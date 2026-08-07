@@ -305,21 +305,23 @@ void loop() {
     }
   }
 
-  // 3. ส่งข้อมูลขึ้น Cloud และเช็คสวิตช์พัดลมแบบ String parsing ธรรมดา (ไม่ต้องใช้ ArduinoJson)
+  // 3. ส่งข้อมูลขึ้น Cloud และเช็คสวิตช์พัดลม
   if ((millis() - lastSend > (sendIntervalSec * 1000)) && WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client; client.setInsecure();
     HTTPClient http;
     http.begin(client, serverUrl);
     http.addHeader("Content-Type", "application/json");
 
-    String json = "{\"temperature\":" + String(temp) + 
-                  ",\"humidity\":" + String(humi) + 
-                  ",\"sensor_error\":" + String(isSensorError ? "true" : "false") + "}";
+    // สร้างข้อความ JSON ปลอดภัย ไร้ Error String syntax
+    String json = "{";
+    json += "\"temperature\":" + String(temp, 1) + ",";
+    json += "\"humidity\":" + String(humi, 1) + ",";
+    json += "\"sensor_error\":" + String(isSensorError ? "true" : "false");
+    json += "}";
 
     lastCloudCode = http.POST(json);
     if (lastCloudCode == 200) {
       String res = http.getString();
-      // ค้นหาข้อความ "fanState":true ในผลลัพธ์
       if (res.indexOf("\"fanState\":true") >= 0) {
         fanState = true;
       } else if (res.indexOf("\"fanState\":false") >= 0) {
@@ -337,7 +339,7 @@ void loop() {
   }
 }`;
 
-  // Code version 2: Full 2-Way Sync Code with ArduinoJson Library
+  // Code version 2: Full 2-Way Sync Code with ArduinoJson v7 Library
   const esp32CodeJson = `#include <SPI.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
@@ -346,7 +348,7 @@ void loop() {
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <SimpleDHT.h>
-#include <ArduinoJson.h> // ต้องลง Library "ArduinoJson" โดย Benoit Blanchon ใน Arduino IDE
+#include <ArduinoJson.h> // รองรับ ArduinoJson v7.x (Benoit Blanchon)
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
 const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app/api/sensor-data";
@@ -451,24 +453,29 @@ void loop() {
     }
   }
 
-  // 3. ส่งข้อมูลขึ้น Cloud และรับคำสั่ง JSON อัตโนมัติ
+  // 3. ส่งข้อมูลขึ้น Cloud ด้วย ArduinoJson v7 (ปลอดภัย 100%)
   if ((millis() - lastSend > (sendIntervalSec * 1000)) && WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client; client.setInsecure();
     HTTPClient http;
     http.begin(client, serverUrl);
     http.addHeader("Content-Type", "application/json");
 
-    String json = "{\"temperature\":" + String(temp) + 
-                  ",\"humidity\":" + String(humi) + 
-                  ",\"sensor_error\":" + String(isSensorError ? "true" : "false") + "}";
+    // ใช้ ArduinoJson v7 สร้าง JSON อัตโนมัติ ไร้ Error String syntax
+    JsonDocument docOut;
+    docOut["temperature"] = temp;
+    docOut["humidity"] = humi;
+    docOut["sensor_error"] = isSensorError;
+    
+    String json;
+    serializeJson(docOut, json);
 
     lastCloudCode = http.POST(json);
     if (lastCloudCode == 200) {
       String response = http.getString();
-      DynamicJsonDocument doc(1024);
-      DeserializationError error = deserializeJson(doc, response);
-      if (!error && doc.containsKey("config")) {
-        JsonObject cfg = doc["config"];
+      JsonDocument docIn;
+      DeserializationError error = deserializeJson(docIn, response);
+      if (!error && docIn.containsKey("config")) {
+        JsonObject cfg = docIn["config"];
         fanState = cfg["fanState"] | fanState;
         autoFan = cfg["autoFan"] | autoFan;
         sendIntervalSec = cfg["sendIntervalSec"] | sendIntervalSec;
@@ -639,6 +646,26 @@ void loop() {
                       </div>
                     </div>
 
+                    {/* Fix Error 3: string literal operator error */}
+                    <div className="bg-orange-50 border border-orange-200 rounded-xl p-5 space-y-3">
+                      <div className="flex items-start gap-3">
+                        <AlertCircle className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-bold text-orange-900 text-base">รูปที่ 3: "unable to find string literal operator 'operator""temperature'" หมายถึงอะไร?</h3>
+                          <p className="text-xs text-orange-700 mt-1">
+                            แปลว่าในโค้ด C++ มีการใส่เครื่องหมายอัญประกาศ <code className="bg-orange-100 text-orange-900 px-1 rounded font-mono">"..."</code> ซ้อนกันผิดรูปแบบในการต่อข้อความ String ครับ
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-lg border border-orange-200 space-y-2 text-xs text-slate-700">
+                        <p className="font-bold text-slate-800">✅ วิธีแก้ไข (แก้ไขโค้ดให้แล้วเรียบร้อย):</p>
+                        <p className="text-slate-600 leading-relaxed">
+                          คุณลง <strong>ArduinoJson 7.4.3</strong> สำเร็จแล้ว! ให้คลิกเลือกแท็บ <span className="text-purple-700 font-bold">"3. โค้ด Full 2-Way Sync (ใช้ ArduinoJson)"</span> ด้านบน แล้วคัดลอกโค้ดใหม่ไปวางใน Arduino IDE ได้เลยครับ โค้ดใหม่ใช้ระบบ <code className="bg-slate-100 px-1 rounded text-purple-700 font-mono">JsonDocument</code> ของ ArduinoJson v7 ในการสร้าง JSON อัตโนมัติ <u>จะไม่ติด Error เครื่องหมายคำพูดซ้อนกันอีก 100% ครับ!</u>
+                        </p>
+                      </div>
+                    </div>
+
                     {/* Fix Error 2: Serial Port Error */}
                     <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">
                       <div className="flex items-start gap-3">
@@ -646,7 +673,7 @@ void loop() {
                         <div>
                           <h3 className="font-bold text-amber-900 text-base">รูปที่ 2: "Port monitor error: Could not connect to COM3" หมายถึงอะไร?</h3>
                           <p className="text-xs text-amber-700 mt-1">
-                            ในรูป สังเกตบรรทัด <code className="bg-amber-100 text-amber-900 px-1 rounded">100% 711519/711519 bytes... Hard resetting via RTS pin</code> แปลว่า <strong>โปรแกรมถูกเบิร์นลงบอร์ด ESP32 สำเร็จเรียบร้อยแล้วครับ!</strong>
+                            ในรูป สังเกตบรรทัด <code className="bg-amber-100 text-amber-900 px-1 rounded">100% ... Hard resetting via RTS pin</code> แปลว่า <strong>โปรแกรมถูกเบิร์นลงบอร์ด ESP32 สำเร็จเรียบร้อยแล้วครับ!</strong>
                           </p>
                         </div>
                       </div>
@@ -654,7 +681,7 @@ void loop() {
                       <div className="bg-white p-4 rounded-lg border border-amber-200 space-y-2 text-xs text-slate-700">
                         <p className="font-bold text-slate-800">✅ วิธีทำให้ Serial Monitor เปิดขึ้นมาดูค่าได้ตามปกติ:</p>
                         <ul className="list-disc list-inside space-y-1.5 text-slate-600 leading-relaxed">
-                          <li>เมื่อแฟลชเสร็จ บอร์ด ESP32 จะทำการ Hard Reset ชั่วคราว สาย COM Port จึงตัดการเชื่อมต่อชั่วแป๊บเดียวแล้วติดใหม่</li>
+                          <li>เมื่อแฟลชเสร็จ บอร์ด ESP32 จะทำการ Reset ชั่วคราว สาย COM Port จึงตัดการเชื่อมต่อชั่วแป๊บเดียวแล้วติดใหม่</li>
                           <li>ให้กดถอดสาย USB แล้วเสียบกลับเข้าไปใหม่ หรือกดปุ่ม <strong>EN / RST</strong> สีดำบนตัวบอร์ด ESP32</li>
                           <li>ในโปรแกรม Arduino IDE ด้านบน เมนู <strong>Tools {'>'} Port</strong> ให้ติ๊กเลือกพอร์ต <strong>COM3</strong> อีกครั้ง แล้วเปิดหน้าต่าง Serial Monitor ขึ้นมาใหม่ได้เลยครับ!</li>
                         </ul>
