@@ -16,9 +16,27 @@
         "humidity": {
           "type": "number",
           "description": "Humidity percentage."
+        },
+        "sensor_error": {
+          "type": "boolean",
+          "description": "Whether sensor had an error."
         }
       },
       "required": ["timestamp", "temperature", "humidity"]
+    },
+    "DeviceSettings": {
+      "title": "Device Settings",
+      "description": "Remote configuration and control state for ESP32.",
+      "type": "object",
+      "properties": {
+        "maxTemp": { "type": "number" },
+        "maxHum": { "type": "number" },
+        "sendIntervalSec": { "type": "number" },
+        "fanState": { "type": "boolean" },
+        "autoFan": { "type": "boolean" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["maxTemp", "maxHum", "sendIntervalSec", "fanState", "autoFan"]
     }
   },
   "firestore": {
@@ -27,6 +45,12 @@
         "$ref": "#/entities/SensorData"
       },
       "description": "Sensor readings from the ESP32."
+    },
+    "/device_settings/{configId}": {
+      "schema": {
+        "$ref": "#/entities/DeviceSettings"
+      },
+      "description": "Device settings and remote control state."
     }
   }
 }

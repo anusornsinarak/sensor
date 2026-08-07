@@ -10,20 +10,30 @@ service cloud.firestore {
 
     function isValidSensorData(data) {
       return data.keys().hasAll(['timestamp', 'temperature', 'humidity']) &&
-             data.keys().size() == 3 &&
              data.timestamp is number &&
              data.temperature is number &&
              data.humidity is number;
     }
 
+    function isValidDeviceSettings(data) {
+      return data.keys().hasAll(['maxTemp', 'maxHum', 'sendIntervalSec', 'fanState', 'autoFan']) &&
+             data.maxTemp is number &&
+             data.maxHum is number &&
+             data.sendIntervalSec is number &&
+             data.fanState is bool &&
+             data.autoFan is bool;
+    }
+
     match /sensor_data/{dataId} {
-      // Allow anyone to read the dashboard data.
       allow get: if true;
       allow list: if resource.data.timestamp > 0;
-
-      // Allow creating new sensor data if it matches the schema.
-      // In a real production app, you would require a secret token here.
       allow create: if isValidSensorData(incoming());
+    }
+
+    match /device_settings/{configId} {
+      allow get: if true;
+      allow list: if true;
+      allow create, update: if isValidDeviceSettings(incoming());
     }
   }
 }
