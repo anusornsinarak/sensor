@@ -2,8 +2,15 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine 
 } from 'recharts';
-import { Thermometer, Droplets, Settings, Activity, AlertTriangle, Cpu } from 'lucide-react';
+import { Thermometer, Droplets, Settings, Activity, AlertTriangle, Cpu, Download } from 'lucide-react';
 import { format } from 'date-fns';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
+import firebaseConfig from '../firebase-applet-config.json';
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 interface SensorData {
   id: string;
@@ -23,25 +30,60 @@ export default function App() {
   });
   const [showSettings, setShowSettings] = useState(false);
 
-  // Fetch data from our Express server
-  const fetchData = async () => {
-    try {
-      const res = await fetch('/api/sensor-data');
-      if (res.ok) {
-        const json = await res.json();
-        setData(json);
-      }
-    } catch (err) {
-      console.error('Failed to fetch sensor data:', err);
-    }
-  };
-
+  // Fetch real-time data from Firestore
   useEffect(() => {
-    fetchData();
-    // Poll every 5 seconds for new data from ESP32
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
+    // We only fetch the latest 1000 records to prevent memory issues in the browser
+    const q = query(
+      collection(db, 'sensor_data'),
+      orderBy('timestamp', 'desc'),
+      limit(1000)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const sensorReadings = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      } as SensorData));
+      
+      // Sort ascending for the charts (oldest to newest)
+      sensorReadings.sort((a, b) => a.timestamp - b.timestamp);
+      setData(sensorReadings);
+    }, (error) => {
+      console.error("Firestore real-time subscription error:", error);
+    });
+
+    return () => unsubscribe();
   }, []);
+
+  const exportToCSV = () => {
+    if (data.length === 0) return;
+    
+    const headers = ['Timestamp', 'Date', 'Time', 'Temperature (°C)', 'Humidity (%)'];
+    const csvRows = [headers.join(',')];
+    
+    data.forEach(row => {
+      const date = new Date(row.timestamp);
+      const rowData = [
+        row.timestamp,
+        format(date, 'yyyy-MM-dd'),
+        format(date, 'HH:mm:ss'),
+        row.temperature,
+        row.humidity
+      ];
+      csvRows.push(rowData.join(','));
+    });
+    
+    const csvString = csvRows.join('\n');
+    const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `sensor_data_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   // Filter data based on selected time range
   const filteredData = useMemo(() => {
@@ -88,6 +130,14 @@ export default function App() {
           <h1 className="text-lg sm:text-xl font-bold tracking-tight">SensorFlow <span className="text-blue-600">Real-time</span></h1>
         </div>
         <div className="flex items-center gap-4 sm:gap-6">
+          <button 
+            onClick={exportToCSV}
+            title="Export CSV"
+            className="flex items-center gap-2 p-2 sm:px-3 sm:py-1.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            <span className="hidden sm:inline">Export CSV</span>
+          </button>
           <button 
             onClick={() => setShowSettings(!showSettings)}
             className={`p-2 rounded-full transition-colors ${showSettings ? 'bg-blue-100 text-blue-600' : 'text-slate-500 hover:bg-slate-100'}`}

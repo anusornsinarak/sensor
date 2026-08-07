@@ -1,0 +1,32 @@
+{
+  "entities": {
+    "SensorData": {
+      "title": "Sensor Data",
+      "description": "Temperature and humidity reading from a device.",
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number",
+          "description": "Timestamp of the reading."
+        },
+        "temperature": {
+          "type": "number",
+          "description": "Temperature in Celsius."
+        },
+        "humidity": {
+          "type": "number",
+          "description": "Humidity percentage."
+        }
+      },
+      "required": ["timestamp", "temperature", "humidity"]
+    }
+  },
+  "firestore": {
+    "/sensor_data/{dataId}": {
+      "schema": {
+        "$ref": "#/entities/SensorData"
+      },
+      "description": "Sensor readings from the ESP32."
+    }
+  }
+}
