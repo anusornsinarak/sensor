@@ -1,0 +1,6 @@
+{
+  "name": "IoT Sensor Dashboard",
+  "description": "Real-time temperature and humidity dashboard with alerts and ESP32 backend integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
