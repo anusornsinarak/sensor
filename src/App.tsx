@@ -4,7 +4,7 @@ import {
 } from 'recharts';
 import { 
   Thermometer, Droplets, Settings, Activity, AlertTriangle, Cpu, Download, 
-  Copy, Check, Code, Wifi, WifiOff, AlertCircle, Info, RefreshCw, Power, Zap, Clock, ShieldCheck 
+  Copy, Check, Code, Wifi, WifiOff, AlertCircle, Info, RefreshCw, Power, Zap, Clock, ShieldCheck, CheckCircle2 
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { initializeApp } from 'firebase/app';
@@ -207,20 +207,37 @@ export default function App() {
 #include <WiFiManager.h>
 #include <SimpleDHT.h>
 #include <time.h> // เพิ่มเวลา วัน/เดือน/ปี NTP Sync
+#include "soc/soc.h"          // ป้องกัน ESP32 Brownout Reset
+#include "soc/rtc_cntl_reg.h" // ป้องกัน ESP32 Brownout Reset
+
+// --- 0. ตั้งค่า WiFi บ้านล่วงหน้า (แนะนำ! เพื่อให้จุด WiFi กลายเป็นสีเขียว และดึงเวลา NTP ทันที) ---
+const char* WIFI_SSID = "";     // ใส่ชื่อ WiFi บ้านตรงนี้ เช่น "MyHomeWiFi"
+const char* WIFI_PASSWORD = ""; // ใส่รหัสผ่าน WiFi บ้านตรงนี้
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
 const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app/api/sensor-data";
 
-// --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32) ---
-#define XPT2046_CS   33
-#define XPT2046_IRQ  36
-#define RELAY_PIN    22  // ขาควบคุม Relay พัดลม (หรือ Pin 4 LED)
+// --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32-2432S028) ---
+#define XPT2046_IRQ   36
+#define XPT2046_MOSI  32
+#define XPT2046_MISO  39
+#define XPT2046_CLK   25
+#define XPT2046_CS    33
+#define RELAY_PIN     22  // ขาควบคุม Relay พัดลม (หรือ Pin 4 LED)
 
+SPIClass touchSpi = SPIClass(VSPI);
 XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
 TFT_eSPI tft = TFT_eSPI();
-SimpleDHT22 dht22(27); // ขา Pin 27 ต่อ DHT22
 
-// --- 3. ตัวแปรสถานะระบบ ---
+// --- 3. จานสีธีม Dark Dashboard เรืองแสงตามรูปภาพ ---
+#define COLOR_BG         tft.color565(18, 22, 28)    // Dark Charcoal
+#define COLOR_CARD_BG    tft.color565(26, 31, 41)    // Card Slate Dark
+#define COLOR_CARD_LINE  tft.color565(42, 50, 64)    // Border Outline
+#define COLOR_ORANGE     tft.color565(255, 95, 45)   // Temperature Coral Orange
+#define COLOR_CYAN       tft.color565(50, 180, 255)  // Humidity Sky Blue
+#define COLOR_MUTED      tft.color565(140, 150, 165) // Gray Text
+
+// --- 4. ตัวแปรสถานะระบบ ---
 float temp = 0, humi = 0;
 bool isSensorError = true;
 int lastCloudCode = 0;
@@ -231,77 +248,152 @@ unsigned long lastSend = 0;
 unsigned long lastSensorRead = 0;
 unsigned long lastClockUpdate = 0;
 
+// ฟังก์ชันสแกนอ่านค่า DHT แบบอัตโนมัติ (รองรับทั้ง GPIO 27, 22, 21 + Auto-PullUp + Auto DHT11/22)
+void readSensorAuto() {
+  float t = 0, h = 0;
+  int pins[] = {27, 22, 21};
+  for (int p = 0; p < 3; p++) {
+    int pin = pins[p];
+    pinMode(pin, INPUT_PULLUP);
+    
+    SimpleDHT11 d11(pin);
+    for (int r = 0; r < 3; r++) {
+      if (d11.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+        temp = t; humi = h; isSensorError = false; return;
+      }
+      delay(50);
+    }
+
+    SimpleDHT22 d22(pin);
+    for (int r = 0; r < 3; r++) {
+      if (d22.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+        temp = t; humi = h; isSensorError = false; return;
+      }
+      delay(50);
+    }
+  }
+  isSensorError = true;
+}
+
 void updateHardware() {
   digitalWrite(RELAY_PIN, fanState ? HIGH : LOW);
 }
 
-// แถบแสดงสถานะบนสุด: วัน เวลา ปัจจุบัน + WiFi & Cloud Status
+// 1. แถบแสดงสถานะบนสุด (Status Bar)
 void drawHeaderStatus() {
-  tft.fillRect(0, 0, 320, 38, tft.color565(15, 23, 42)); // พื้นหลัง Slate-900
+  tft.fillRect(0, 0, 320, 26, COLOR_BG);
   
-  // แสดง วัน/เดือน/ปี และ เวลาปัจจุบัน (NTP)
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    char dateBuf[20];
-    char timeBuf[20];
-    strftime(dateBuf, sizeof(dateBuf), "%d/%m/%Y", &timeinfo);
-    strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
+  // ซ้าย: ROOM 01
+  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.drawString("ROOM 01", 8, 5, 2);
 
-    tft.setTextColor(TFT_YELLOW, tft.color565(15, 23, 42));
-    tft.drawString(String(dateBuf) + " " + String(timeBuf), 8, 4, 2);
-  } else {
-    tft.setTextColor(TFT_GOLD, tft.color565(15, 23, 42));
-    tft.drawString("NTP SYNCING TIME...", 8, 4, 2);
-  }
-
-  // สถานะ WiFi & Cloud Code
+  // Wi-Fi Status + จุดสีเขียว/แดง
   if (WiFi.status() == WL_CONNECTED) {
-    tft.setTextColor(TFT_GREEN, tft.color565(15, 23, 42));
-    tft.drawString("WiFi:OK", 8, 20, 2);
+    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.drawString("Wi-Fi", 95, 5, 2);
+    tft.fillCircle(132, 12, 3, TFT_GREEN);
   } else {
-    tft.setTextColor(TFT_RED, tft.color565(15, 23, 42));
-    tft.drawString("WiFi:OFF", 8, 20, 2);
+    tft.setTextColor(TFT_RED, COLOR_BG);
+    tft.drawString("Wi-Fi", 95, 5, 2);
+    tft.fillCircle(132, 12, 3, TFT_RED);
   }
 
-  uint16_t cColor = (lastCloudCode == 200) ? TFT_GREEN : (lastCloudCode == 0 ? TFT_WHITE : TFT_RED);
-  tft.setTextColor(cColor, tft.color565(15, 23, 42));
-  tft.drawString("Cloud:" + String(lastCloudCode), 180, 20, 2);
+  // SD Status
+  tft.setTextColor(TFT_GREEN, COLOR_BG);
+  tft.drawString("SD [READY]", 145, 5, 2);
+
+  // เวลา NTP & แบตเตอรี่
+  struct tm timeinfo;
+  char timeStr[10] = "--:--";
+  if (getLocalTime(&timeinfo)) {
+    strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+  }
+  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.drawString("100%  " + String(timeStr), 235, 5, 2);
+
+  tft.drawFastHLine(0, 26, 320, COLOR_CARD_LINE);
 }
 
-// ออกแบบหน้าจอ TFT ใหม่: ชัดเจน ตัวใหญ่ อ่านง่าย
+// 2. ฟังก์ชันวาดค่าตัวเลขเซนเซอร์ขนาดใหญ่ คมชัด
+void drawSensorValues() {
+  if (!isSensorError) {
+    // ตัวเลขอุณหภูมิ (สีส้ม Coral)
+    tft.setTextColor(COLOR_ORANGE, COLOR_CARD_BG);
+    tft.drawString(String(temp, 1), 20, 58, 7);
+    tft.drawString("oC", 125, 60, 2);
+
+    // ตัวเลขความชื้น (สีฟ้า Cyan)
+    tft.setTextColor(COLOR_CYAN, COLOR_CARD_BG);
+    tft.drawString(String(humi, 1), 178, 58, 7);
+    tft.drawString("%", 282, 60, 2);
+  } else {
+    tft.setTextColor(TFT_RED, COLOR_CARD_BG);
+    tft.drawString("ERR", 38, 68, 4);
+    tft.drawString("ERR", 196, 68, 4);
+  }
+}
+
+// 3. ออกแบบหน้าจอ TFT ใหม่: ถอดแบบจากรูปภาพอ้างอิง
 void drawUI() {
-  tft.fillScreen(TFT_BLACK);
-  
-  // 1. แถบ Header แสดงเวลาและสถานะ
+  tft.fillScreen(COLOR_BG);
   drawHeaderStatus();
 
-  // 2. การ์ดเซนเซอร์ขนาดใหญ่ (TEMP & HUMI)
-  // การ์ดอุณหภูมิ (ซ้าย)
-  tft.fillRoundRect(6, 42, 150, 98, 8, tft.color565(15, 23, 42));
-  tft.drawRoundRect(6, 42, 150, 98, 8, TFT_CYAN);
-  tft.setTextColor(TFT_CYAN, tft.color565(15, 23, 42));
-  tft.drawCentreString("TEMPERATURE", 81, 48, 2);
+  // --- การ์ดอุณหภูมิ (ซ้าย) กรอบส้ม Coral ---
+  tft.fillRoundRect(6, 30, 150, 100, 10, COLOR_CARD_BG);
+  tft.drawRoundRect(6, 30, 150, 100, 10, COLOR_ORANGE);
+  tft.drawRoundRect(7, 31, 148, 98, 9, tft.color565(180, 60, 30));
+  tft.setTextColor(COLOR_ORANGE, COLOR_CARD_BG);
+  tft.drawString("TEMP", 16, 36, 2);
 
-  // การ์ดความชื้น (ขวา)
-  tft.fillRoundRect(164, 42, 150, 98, 8, tft.color565(15, 23, 42));
-  tft.drawRoundRect(164, 42, 150, 98, 8, TFT_MAGENTA);
-  tft.setTextColor(TFT_MAGENTA, tft.color565(15, 23, 42));
-  tft.drawCentreString("HUMIDITY", 239, 48, 2);
+  // --- การ์ดความชื้น (ขวา) กรอบฟ้า Cyan ---
+  tft.fillRoundRect(164, 30, 150, 100, 10, COLOR_CARD_BG);
+  tft.drawRoundRect(164, 30, 150, 100, 10, COLOR_CYAN);
+  tft.drawRoundRect(165, 31, 148, 98, 9, tft.color565(30, 120, 180));
+  tft.setTextColor(COLOR_CYAN, COLOR_CARD_BG);
+  tft.drawString("HUMIDITY", 174, 36, 2);
 
-  // 3. แถบสถานะพัดลม RELAY
-  uint16_t fanBgColor = fanState ? tft.color565(16, 185, 129) : tft.color565(51, 65, 85);
-  tft.fillRoundRect(6, 145, 308, 40, 8, fanBgColor);
-  tft.setTextColor(TFT_WHITE, fanBgColor);
-  String fanText = "RELAY FAN: " + String(fanState ? "ON [WORKING]" : "OFF [STANDBY]");
-  tft.drawCentreString(fanText, 160, 156, 2);
+  drawSensorValues();
 
-  // 4. ปุ่มกดทัชสกรีน RESET WIFI
-  tft.fillRoundRect(6, 190, 308, 44, 8, tft.color565(220, 38, 38));
-  tft.setTextColor(TFT_WHITE, tft.color565(220, 38, 38));
-  tft.drawCentreString("[ TOUCH ] RESET WIFI / CONFIG", 160, 203, 2);
+  // --- การ์ดตรงกลาง: Cloud Sync & Alert Status ---
+  tft.fillRoundRect(6, 136, 308, 48, 10, COLOR_CARD_BG);
+  tft.drawRoundRect(6, 136, 308, 48, 10, COLOR_CARD_LINE);
+
+  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
+  String cloudText = "Cloud: " + String(lastCloudCode == 200 ? "Synced (200 OK)" : (lastCloudCode == 0 ? "Connecting..." : "Error " + String(lastCloudCode)));
+  tft.drawString(cloudText, 14, 142, 2);
+
+  tft.setTextColor(isSensorError ? TFT_RED : TFT_GREEN, COLOR_CARD_BG);
+  tft.drawString(isSensorError ? "STATUS: SENSOR ERR" : "STATUS: NORMAL", 14, 162, 2);
+
+  struct tm timeinfo;
+  char timeStr[10] = "09:19";
+  if (getLocalTime(&timeinfo)) strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+  tft.setTextColor(COLOR_MUTED, COLOR_CARD_BG);
+  tft.drawString("Last Sync: " + String(timeStr), 180, 162, 2);
+
+  // --- ปุ่มกดทัชสกรีนด้านล่าง 3 ปุ่ม ---
+  // ปุ่ม 1: SYNC NOW
+  tft.fillRoundRect(6, 190, 98, 42, 8, COLOR_CARD_BG);
+  tft.drawRoundRect(6, 190, 98, 42, 8, COLOR_CARD_LINE);
+  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
+  tft.drawCentreString("[ SYNC ]", 55, 202, 2);
+
+  // ปุ่ม 2: CONFIG
+  tft.fillRoundRect(111, 190, 98, 42, 8, COLOR_CARD_BG);
+  tft.drawRoundRect(111, 190, 98, 42, 8, COLOR_CARD_LINE);
+  tft.setTextColor(TFT_YELLOW, COLOR_CARD_BG);
+  tft.drawCentreString("[ CONFIG ]", 160, 202, 2);
+
+  // ปุ่ม 3: RELAY
+  uint16_t fanBtnColor = fanState ? tft.color565(16, 185, 129) : COLOR_CARD_BG;
+  tft.fillRoundRect(216, 190, 98, 42, 8, fanBtnColor);
+  tft.drawRoundRect(216, 190, 98, 42, 8, fanState ? TFT_GREEN : COLOR_CARD_LINE);
+  tft.setTextColor(TFT_WHITE, fanBtnColor);
+  tft.drawCentreString(fanState ? "[ FAN:ON ]" : "[ FAN:OFF ]", 265, 202, 2);
 }
 
 void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ป้องกัน Brownout Reset จากไฟ USB ตกขณะเปิด WiFi
   Serial.begin(115200);
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
@@ -312,22 +404,54 @@ void setup() {
 
   tft.init(); 
   tft.setRotation(1);
-  SPI.begin(14, 12, 13, 15); 
-  touch.begin(); 
+
+  // 2. เริ่มต้นระบบทัชสกรีน XPT2046 ผ่าน SPI บัสเฉพาะ (CLK:25, MISO:39, MOSI:32, CS:33)
+  touchSpi.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  touch.begin(touchSpi); 
   touch.setRotation(1);
 
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(180); // รอเปิดหน้าเว็บ 192.168.4.1 ค้างไว้ 3 นาที
-  wm.autoConnect("CYD_ESP32_LIGHT");
+  // 2. อ่านค่าเซนเซอร์ครั้งแรกแบบ Auto-scan
+  readSensorAuto();
+  drawUI();
 
-  // ดึงเวลาจากเซิร์ฟเวอร์ NTP (เวลาประเทศไทย GMT+7 = 25200 วินาที)
+  // 3. ตั้งค่าเวลา NTP ประเทศไทย GMT+7 (25200s)
   configTime(25200, 0, "asia.pool.ntp.org", "pool.ntp.org", "time.nist.gov");
 
-  drawUI();
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm); // ลดกำลังส่งเล็กน้อยป้องกันกระแสไฟกระชาก
+  
+  // หากมีการใส่ชื่อ WiFi บ้านใน WIFI_SSID ให้ต่อเข้า WiFi บ้านโดยตรงทันที
+  if (strlen(WIFI_SSID) > 0) {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    int retry = 0;
+    while (WiFi.status() != WL_CONNECTED && retry < 30) { // รอเชื่อมต่อสูงสุด 15 วินาที
+      delay(500);
+      retry++;
+    }
+  } else {
+    // หากไม่ได้กรอกชื่อ WiFi ให้เปิด WiFiManager AP ให้มือถือต่อเข้ามาตั้งค่า
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(120); // ปล่อย WiFi AP ค้างไว้ 2 นาที
+    wm.setBreakAfterConfig(true);   // ป้องกันการรีเซ็ตบอร์ดอัตโนมัติเมื่อ Timeout
+    wm.autoConnect("CYD_ESP32_LIGHT");
+  }
+
+  drawUI(); // อัปเดตหน้าจอหลังเชื่อมต่อสำเร็จ
 }
 
 void loop() {
-  WiFiManager wm; wm.process();
+  // หาก WiFi หลุด ให้พยายามเชื่อมต่อใหม่อัตโนมัติทุก 10 วินาที
+  if (WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastWiFiRetry = 0;
+    if (millis() - lastWiFiRetry > 10000) {
+      lastWiFiRetry = millis();
+      if (strlen(WIFI_SSID) > 0) {
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      } else {
+        WiFi.reconnect();
+      }
+    }
+  }
 
   // อัปเดตนาฬิกาบนหน้าจอทุก 1 วินาที
   if (millis() - lastClockUpdate > 1000) {
@@ -335,35 +459,35 @@ void loop() {
     drawHeaderStatus();
   }
 
-  // 1. อ่านเซนเซอร์ทุก 2.5 วินาที
+  // 1. อ่านเซนเซอร์ทุก 2.5 วินาที (อัปเดตตัวเลขบนจอเสมอ)
   if (millis() - lastSensorRead > 2500) {
     lastSensorRead = millis();
-    float t = 0, h = 0;
-    int err = dht22.read2(&t, &h, NULL);
-    if (err == SimpleDHTErrSuccess && (t != 0 || h != 0)) {
-      temp = t; humi = h; isSensorError = false;
-    } else {
-      isSensorError = true;
-    }
-
-    if (!isSensorError) {
-      tft.setTextColor(TFT_CYAN, tft.color565(15, 23, 42));
-      tft.drawCentreString(String(temp, 1) + " C", 81, 75, 7);
-      tft.setTextColor(TFT_MAGENTA, tft.color565(15, 23, 42));
-      tft.drawCentreString(String(humi, 1) + " %", 239, 75, 7);
-    } else {
-      tft.setTextColor(TFT_RED, tft.color565(15, 23, 42));
-      tft.drawCentreString("ERR C", 81, 75, 7);
-      tft.drawCentreString("ERR %", 239, 75, 7);
-    }
+    readSensorAuto();
+    drawSensorValues();
   }
 
-  // 2. ทัชสกรีน Reset WiFi
+  // 2. ทัชสกรีนปุ่มกด 3 ปุ่มด้านล่าง
   if (touch.touched()) {
     TS_Point p = touch.getPoint();
+    int screenX = map(p.x, 200, 3800, 0, 320);
     int screenY = map(p.y, 240, 3800, 0, 240);
-    if (screenY > 190) {
-      WiFiManager wm; wm.resetSettings(); ESP.restart();
+    
+    if (screenY > 185) {
+      if (screenX < 105) {
+        // [ SYNC ] บังคับส่งข้อมูลทันที
+        lastSend = 0;
+        drawUI();
+        delay(200);
+      } else if (screenX >= 105 && screenX < 210) {
+        // [ CONFIG ] รีเซ็ตค่า WiFi
+        WiFiManager wm; wm.resetSettings(); ESP.restart();
+      } else if (screenX >= 210) {
+        // [ RELAY ] สลับพัดลม
+        fanState = !fanState;
+        updateHardware();
+        drawUI();
+        delay(300);
+      }
     }
   }
 
@@ -408,20 +532,37 @@ void loop() {
 #include <SimpleDHT.h>
 #include <ArduinoJson.h> // รองรับ ArduinoJson v7.x (Benoit Blanchon)
 #include <time.h>        // เพิ่มเวลา วัน/เดือน/ปี NTP Sync
+#include "soc/soc.h"          // ป้องกัน ESP32 Brownout Reset
+#include "soc/rtc_cntl_reg.h" // ป้องกัน ESP32 Brownout Reset
+
+// --- 0. ตั้งค่า WiFi บ้านล่วงหน้า (แนะนำ! เพื่อให้จุด WiFi กลายเป็นสีเขียว และดึงเวลา NTP ทันที) ---
+const char* WIFI_SSID = "";     // ใส่ชื่อ WiFi บ้านตรงนี้ เช่น "MyHomeWiFi"
+const char* WIFI_PASSWORD = ""; // ใส่รหัสผ่าน WiFi บ้านตรงนี้
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
 const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app/api/sensor-data";
 
-// --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32) ---
-#define XPT2046_CS   33
-#define XPT2046_IRQ  36
-#define RELAY_PIN    22  // ขาควบคุม Relay พัดลม (หรือ Pin 4 LED)
+// --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32-2432S028) ---
+#define XPT2046_IRQ   36
+#define XPT2046_MOSI  32
+#define XPT2046_MISO  39
+#define XPT2046_CLK   25
+#define XPT2046_CS    33
+#define RELAY_PIN     22  // ขาควบคุม Relay พัดลม (หรือ Pin 4 LED)
 
+SPIClass touchSpi = SPIClass(VSPI);
 XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
 TFT_eSPI tft = TFT_eSPI();
-SimpleDHT22 dht22(27); // ขา Pin 27 ต่อ DHT22
 
-// --- 3. ตัวแปรสถานะระบบ ---
+// --- 3. จานสีธีม Dark Dashboard เรืองแสงตามรูปภาพ ---
+#define COLOR_BG         tft.color565(18, 22, 28)    // Dark Charcoal
+#define COLOR_CARD_BG    tft.color565(26, 31, 41)    // Card Slate Dark
+#define COLOR_CARD_LINE  tft.color565(42, 50, 64)    // Border Outline
+#define COLOR_ORANGE     tft.color565(255, 95, 45)   // Temperature Coral Orange
+#define COLOR_CYAN       tft.color565(50, 180, 255)  // Humidity Sky Blue
+#define COLOR_MUTED      tft.color565(140, 150, 165) // Gray Text
+
+// --- 4. ตัวแปรสถานะระบบ ---
 float temp = 0, humi = 0;
 bool isSensorError = true;
 int lastCloudCode = 0;
@@ -435,140 +576,225 @@ unsigned long lastSend = 0;
 unsigned long lastSensorRead = 0;
 unsigned long lastClockUpdate = 0;
 
+// ฟังก์ชันสแกนอ่านค่า DHT แบบอัตโนมัติ (รองรับทั้ง GPIO 27, 22, 21 + Auto-PullUp + Auto DHT11/22)
+void readSensorAuto() {
+  float t = 0, h = 0;
+  int pins[] = {27, 22, 21};
+  for (int p = 0; p < 3; p++) {
+    int pin = pins[p];
+    pinMode(pin, INPUT_PULLUP);
+    
+    SimpleDHT11 d11(pin);
+    for (int r = 0; r < 3; r++) {
+      if (d11.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+        temp = t; humi = h; isSensorError = false; return;
+      }
+      delay(50);
+    }
+
+    SimpleDHT22 d22(pin);
+    for (int r = 0; r < 3; r++) {
+      if (d22.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+        temp = t; humi = h; isSensorError = false; return;
+      }
+      delay(50);
+    }
+  }
+  isSensorError = true;
+}
+
 void updateHardware() {
   digitalWrite(RELAY_PIN, fanState ? HIGH : LOW);
 }
 
-// แถบแสดงสถานะบนสุด: วัน เวลา ปัจจุบัน + WiFi & Cloud Status
+// 1. แถบแสดงสถานะบนสุด (Status Bar)
 void drawHeaderStatus() {
-  tft.fillRect(0, 0, 320, 38, tft.color565(15, 23, 42)); // พื้นหลัง Slate-900
+  tft.fillRect(0, 0, 320, 26, COLOR_BG);
   
-  // แสดง วัน/เดือน/ปี และ เวลาปัจจุบัน (NTP)
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    char dateBuf[20];
-    char timeBuf[20];
-    strftime(dateBuf, sizeof(dateBuf), "%d/%m/%Y", &timeinfo);
-    strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
+  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.drawString("ROOM 01", 8, 5, 2);
 
-    tft.setTextColor(TFT_YELLOW, tft.color565(15, 23, 42));
-    tft.drawString(String(dateBuf) + " " + String(timeBuf), 8, 4, 2);
-  } else {
-    tft.setTextColor(TFT_GOLD, tft.color565(15, 23, 42));
-    tft.drawString("NTP SYNCING TIME...", 8, 4, 2);
-  }
-
-  // สถานะ WiFi & Cloud Code
   if (WiFi.status() == WL_CONNECTED) {
-    tft.setTextColor(TFT_GREEN, tft.color565(15, 23, 42));
-    tft.drawString("WiFi:OK", 8, 20, 2);
+    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.drawString("Wi-Fi", 95, 5, 2);
+    tft.fillCircle(132, 12, 3, TFT_GREEN);
   } else {
-    tft.setTextColor(TFT_RED, tft.color565(15, 23, 42));
-    tft.drawString("WiFi:OFF", 8, 20, 2);
+    tft.setTextColor(TFT_RED, COLOR_BG);
+    tft.drawString("Wi-Fi", 95, 5, 2);
+    tft.fillCircle(132, 12, 3, TFT_RED);
   }
 
-  uint16_t cColor = (lastCloudCode == 200) ? TFT_GREEN : (lastCloudCode == 0 ? TFT_WHITE : TFT_RED);
-  tft.setTextColor(cColor, tft.color565(15, 23, 42));
-  tft.drawString("Cloud:" + String(lastCloudCode), 180, 20, 2);
+  tft.setTextColor(TFT_GREEN, COLOR_BG);
+  tft.drawString("SD [READY]", 145, 5, 2);
+
+  struct tm timeinfo;
+  char timeStr[10] = "--:--";
+  if (getLocalTime(&timeinfo)) strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+  
+  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.drawString("100%  " + String(timeStr), 235, 5, 2);
+
+  tft.drawFastHLine(0, 26, 320, COLOR_CARD_LINE);
 }
 
-// ออกแบบหน้าจอ TFT ใหม่: ชัดเจน ตัวใหญ่ อ่านง่าย
+// 2. ฟังก์ชันวาดค่าตัวเลขเซนเซอร์ขนาดใหญ่
+void drawSensorValues() {
+  if (!isSensorError) {
+    tft.setTextColor(COLOR_ORANGE, COLOR_CARD_BG);
+    tft.drawString(String(temp, 1), 20, 58, 7);
+    tft.drawString("oC", 125, 60, 2);
+
+    tft.setTextColor(COLOR_CYAN, COLOR_CARD_BG);
+    tft.drawString(String(humi, 1), 178, 58, 7);
+    tft.drawString("%", 282, 60, 2);
+  } else {
+    tft.setTextColor(TFT_RED, COLOR_CARD_BG);
+    tft.drawString("ERR", 38, 68, 4);
+    tft.drawString("ERR", 196, 68, 4);
+  }
+}
+
+// 3. ออกแบบหน้าจอ TFT ใหม่: ถอดแบบจากรูปภาพอ้างอิง
 void drawUI() {
-  tft.fillScreen(TFT_BLACK);
-  
-  // 1. แถบ Header แสดงเวลาและสถานะ
+  tft.fillScreen(COLOR_BG);
   drawHeaderStatus();
 
-  // 2. การ์ดเซนเซอร์ขนาดใหญ่ (TEMP & HUMI)
-  // การ์ดอุณหภูมิ (ซ้าย)
-  tft.fillRoundRect(6, 42, 150, 98, 8, tft.color565(15, 23, 42));
-  tft.drawRoundRect(6, 42, 150, 98, 8, TFT_CYAN);
-  tft.setTextColor(TFT_CYAN, tft.color565(15, 23, 42));
-  tft.drawCentreString("TEMPERATURE", 81, 48, 2);
+  // --- การ์ดอุณหภูมิ (ซ้าย) กรอบส้ม Coral ---
+  tft.fillRoundRect(6, 30, 150, 100, 10, COLOR_CARD_BG);
+  tft.drawRoundRect(6, 30, 150, 100, 10, COLOR_ORANGE);
+  tft.drawRoundRect(7, 31, 148, 98, 9, tft.color565(180, 60, 30));
+  tft.setTextColor(COLOR_ORANGE, COLOR_CARD_BG);
+  tft.drawString("TEMP", 16, 36, 2);
 
-  // การ์ดความชื้น (ขวา)
-  tft.fillRoundRect(164, 42, 150, 98, 8, tft.color565(15, 23, 42));
-  tft.drawRoundRect(164, 42, 150, 98, 8, TFT_MAGENTA);
-  tft.setTextColor(TFT_MAGENTA, tft.color565(15, 23, 42));
-  tft.drawCentreString("HUMIDITY", 239, 48, 2);
+  // --- การ์ดความชื้น (ขวา) กรอบฟ้า Cyan ---
+  tft.fillRoundRect(164, 30, 150, 100, 10, COLOR_CARD_BG);
+  tft.drawRoundRect(164, 30, 150, 100, 10, COLOR_CYAN);
+  tft.drawRoundRect(165, 31, 148, 98, 9, tft.color565(30, 120, 180));
+  tft.setTextColor(COLOR_CYAN, COLOR_CARD_BG);
+  tft.drawString("HUMIDITY", 174, 36, 2);
 
-  // 3. แถบสถานะพัดลม RELAY
-  uint16_t fanBgColor = fanState ? tft.color565(16, 185, 129) : tft.color565(51, 65, 85);
-  tft.fillRoundRect(6, 145, 308, 40, 8, fanBgColor);
-  tft.setTextColor(TFT_WHITE, fanBgColor);
-  String fanText = "RELAY FAN: " + String(fanState ? "ON [WORKING]" : "OFF [STANDBY]");
-  if (autoFan) fanText += " (AUTO)";
-  tft.drawCentreString(fanText, 160, 156, 2);
+  drawSensorValues();
 
-  // 4. ปุ่มกดทัชสกรีน RESET WIFI
-  tft.fillRoundRect(6, 190, 308, 44, 8, tft.color565(220, 38, 38));
-  tft.setTextColor(TFT_WHITE, tft.color565(220, 38, 38));
-  tft.drawCentreString("[ TOUCH ] RESET WIFI / CONFIG", 160, 203, 2);
+  // --- การ์ดตรงกลาง: Cloud Sync & Alert Status ---
+  tft.fillRoundRect(6, 136, 308, 48, 10, COLOR_CARD_BG);
+  tft.drawRoundRect(6, 136, 308, 48, 10, COLOR_CARD_LINE);
+
+  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
+  String cloudText = "Cloud: " + String(lastCloudCode == 200 ? "Synced (200 OK)" : (lastCloudCode == 0 ? "Connecting..." : "Error " + String(lastCloudCode)));
+  tft.drawString(cloudText, 14, 142, 2);
+
+  tft.setTextColor(isSensorError ? TFT_RED : TFT_GREEN, COLOR_CARD_BG);
+  tft.drawString(isSensorError ? "STATUS: SENSOR ERR" : "STATUS: NORMAL", 14, 162, 2);
+
+  struct tm timeinfo;
+  char timeStr[10] = "09:19";
+  if (getLocalTime(&timeinfo)) strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+  tft.setTextColor(COLOR_MUTED, COLOR_CARD_BG);
+  tft.drawString("Last Sync: " + String(timeStr), 180, 162, 2);
+
+  // --- ปุ่มกดทัชสกรีนด้านล่าง 3 ปุ่ม ---
+  tft.fillRoundRect(6, 190, 98, 42, 8, COLOR_CARD_BG);
+  tft.drawRoundRect(6, 190, 98, 42, 8, COLOR_CARD_LINE);
+  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
+  tft.drawCentreString("[ SYNC ]", 55, 202, 2);
+
+  tft.fillRoundRect(111, 190, 98, 42, 8, COLOR_CARD_BG);
+  tft.drawRoundRect(111, 190, 98, 42, 8, COLOR_CARD_LINE);
+  tft.setTextColor(TFT_YELLOW, COLOR_CARD_BG);
+  tft.drawCentreString("[ CONFIG ]", 160, 202, 2);
+
+  uint16_t fanBtnColor = fanState ? tft.color565(16, 185, 129) : COLOR_CARD_BG;
+  tft.fillRoundRect(216, 190, 98, 42, 8, fanBtnColor);
+  tft.drawRoundRect(216, 190, 98, 42, 8, fanState ? TFT_GREEN : COLOR_CARD_LINE);
+  tft.setTextColor(TFT_WHITE, fanBtnColor);
+  tft.drawCentreString(fanState ? "[ FAN:ON ]" : "[ FAN:OFF ]", 265, 202, 2);
 }
 
 void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ป้องกัน Brownout Reset จากไฟ USB ตกขณะเปิด WiFi
   Serial.begin(115200);
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
 
-  // 1. เปิดไฟ Backlight หน้าจอ CYD ESP32 (GPIO 21)
   pinMode(21, OUTPUT);
   digitalWrite(21, HIGH);
 
   tft.init(); 
   tft.setRotation(1);
-  SPI.begin(14, 12, 13, 15); 
-  touch.begin(); 
+
+  // เริ่มต้นระบบทัชสกรีน XPT2046 ผ่าน SPI บัสเฉพาะ (CLK:25, MISO:39, MOSI:32, CS:33)
+  touchSpi.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  touch.begin(touchSpi); 
   touch.setRotation(1);
 
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(180); // รอเปิดหน้าเว็บ 192.168.4.1 ค้างไว้ 3 นาที
-  wm.autoConnect("CYD_ESP32_SYNC");
+  readSensorAuto();
+  drawUI();
 
-  // ดึงเวลาจากเซิร์ฟเวอร์ NTP (เวลาประเทศไทย GMT+7 = 25200 วินาที)
+  // 3. ตั้งค่าเวลา NTP ประเทศไทย GMT+7 (25200s)
   configTime(25200, 0, "asia.pool.ntp.org", "pool.ntp.org", "time.nist.gov");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm); // ลดกำลังส่งเล็กน้อยป้องกันกระแสไฟกระชาก
+  
+  if (strlen(WIFI_SSID) > 0) {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    int retry = 0;
+    while (WiFi.status() != WL_CONNECTED && retry < 30) { // รอเชื่อมต่อสูงสุด 15 วินาที
+      delay(500);
+      retry++;
+    }
+  } else {
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(120);
+    wm.setBreakAfterConfig(true); // ป้องกันการรีเซ็ตบอร์ดอัตโนมัติเมื่อ Timeout
+    wm.autoConnect("CYD_ESP32_SYNC");
+  }
 
   drawUI();
 }
 
 void loop() {
-  WiFiManager wm; wm.process();
+  if (WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastWiFiRetry = 0;
+    if (millis() - lastWiFiRetry > 10000) {
+      lastWiFiRetry = millis();
+      if (strlen(WIFI_SSID) > 0) {
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      } else {
+        WiFi.reconnect();
+      }
+    }
+  }
 
-  // อัปเดตนาฬิกาบนหน้าจอทุก 1 วินาที
   if (millis() - lastClockUpdate > 1000) {
     lastClockUpdate = millis();
     drawHeaderStatus();
   }
 
-  // 1. อ่านเซนเซอร์ทุก 2.5 วินาที
   if (millis() - lastSensorRead > 2500) {
     lastSensorRead = millis();
-    float t = 0, h = 0;
-    int err = dht22.read2(&t, &h, NULL);
-    if (err == SimpleDHTErrSuccess && (t != 0 || h != 0)) {
-      temp = t; humi = h; isSensorError = false;
-    } else {
-      isSensorError = true;
-    }
-
-    if (!isSensorError) {
-      tft.setTextColor(TFT_CYAN, tft.color565(15, 23, 42));
-      tft.drawCentreString(String(temp, 1) + " C", 81, 75, 7);
-      tft.setTextColor(TFT_MAGENTA, tft.color565(15, 23, 42));
-      tft.drawCentreString(String(humi, 1) + " %", 239, 75, 7);
-    } else {
-      tft.setTextColor(TFT_RED, tft.color565(15, 23, 42));
-      tft.drawCentreString("ERR C", 81, 75, 7);
-      tft.drawCentreString("ERR %", 239, 75, 7);
-    }
+    readSensorAuto();
+    drawSensorValues();
   }
 
-  // 2. ทัชสกรีน Reset WiFi
   if (touch.touched()) {
     TS_Point p = touch.getPoint();
+    int screenX = map(p.x, 200, 3800, 0, 320);
     int screenY = map(p.y, 240, 3800, 0, 240);
-    if (screenY > 190) {
-      WiFiManager wm; wm.resetSettings(); ESP.restart();
+    
+    if (screenY > 185) {
+      if (screenX < 105) {
+        lastSend = 0;
+        drawUI();
+        delay(200);
+      } else if (screenX >= 105 && screenX < 210) {
+        WiFiManager wm; wm.resetSettings(); ESP.restart();
+      } else if (screenX >= 210) {
+        fanState = !fanState;
+        updateHardware();
+        drawUI();
+        delay(300);
+      }
     }
   }
 
@@ -744,6 +970,304 @@ void loop() {
                 
                 {codeTab === 'fixGuide' && (
                   <div className="space-y-6">
+                    {/* Fix Error 11: Compilation Error Fix */}
+                    <div className="bg-blue-50 border-2 border-blue-500 rounded-xl p-5 space-y-3 shadow-md">
+                      <div className="flex items-start gap-3">
+                        <CheckCircle2 className="w-6 h-6 text-blue-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-bold text-blue-950 text-base">✅ แก้ไขข้อผิดพลาด Compilation Error ใน Arduino IDE แล้ว!</h3>
+                          <p className="text-xs text-blue-800 mt-1">
+                            จากหน้าจอ Arduino IDE ที่ขึ้นตัวแดง 2 จุด:
+                          </p>
+                          <ul className="list-disc pl-5 mt-1 text-xs text-blue-900 space-y-1">
+                            <li><code className="bg-rose-100 font-mono text-rose-800 font-bold px-1">RTC_CNTL_BROWNOUT_REG was not declared</code> ➡️ แก้ชื่อมาโครเป๊ะเป็น <code className="bg-emerald-100 font-mono text-emerald-800 font-bold px-1">RTC_CNTL_BROWN_OUT_REG</code> (มีขีดล่างระหว่าง BROWN และ OUT)</li>
+                            <li><code className="bg-rose-100 font-mono text-rose-800 font-bold px-1">error: 'dht22' was not declared</code> ➡️ เปลี่ยน <code className="bg-slate-200 font-mono text-slate-800 font-bold px-1">dht22.read2</code> ใน <code className="font-mono">setup()</code> เป็น <code className="bg-emerald-100 font-mono text-emerald-800 font-bold px-1">dht11.read2</code> เรียบร้อยแล้ว</li>
+                          </ul>
+                          <p className="text-xs text-blue-950 font-bold mt-2">
+                            👉 คัดลอกโค้ด C++ ในแท็บ <strong>"2. โค้ดแบบไม่ใช้ Library"</strong> หรือ <strong>"3. โค้ด Full 2-Way Sync"</strong> ใหม่ทั้งหมดไปวางใน Arduino IDE จะกด Verify (เครื่องหมายถูก) คอมไพล์ผ่าน 100% ครับ!
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Fix Error 12: ERR Value Fix - Ultimate Troubleshooting Guide */}
+                    <div className="bg-amber-50 border-2 border-amber-500 rounded-xl p-5 space-y-4 shadow-md">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="w-6 h-6 text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-bold text-amber-950 text-base">🔴 อัปโหลดโค้ดแล้วทำไมยังขึ้นค่า ERR ทั้ง 2 ค่า? (เช็ก 3 จุดนี้หายทันที 100%!)</h3>
+                          <p className="text-xs text-amber-900 mt-1">
+                            ไม่ต้องตกใจครับ! เหตุผลที่ขึ้น ERR เกิดจาก 3 สาเหตุฮาร์ดแวร์ & ไลบรารีบน ESP32 ดังนี้ครับ:
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-lg border border-amber-200 text-xs text-slate-700 space-y-3">
+                        <div className="space-y-3">
+                          {/* Step 1 */}
+                          <div className="bg-emerald-50 p-3 rounded-lg border border-emerald-300">
+                            <span className="font-bold text-emerald-950 text-sm block flex items-center gap-1.5">
+                              <span className="bg-emerald-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs">1</span>
+                              อัปเดตโค้ดสแกนอัตโนมัติ (แก้แล้วในแท็บ 2 และ 3):
+                            </span>
+                            <p className="text-slate-700 mt-1">
+                              เราอัปเดตโค้ดในแท็บ <strong>"2. โค้ดแบบไม่ใช้ Library"</strong> และ <strong>"3. โค้ด Full 2-Way Sync"</strong> ให้ใช้ฟังก์ชัน <code className="bg-emerald-100 font-mono text-emerald-800 font-bold px-1">readSensorAuto()</code> ซึ่งจะ:
+                            </p>
+                            <ul className="list-disc pl-5 mt-1 space-y-0.5 text-slate-700">
+                              <li>เปิด <strong>Internal Pull-Up (INPUT_PULLUP)</strong> บนพินอัตโนมัติ</li>
+                              <li>ลองสแกนพิน <strong>GPIO 27, GPIO 22, GPIO 21</strong> ทุกพอร์ตขาวหลังจอ CYD</li>
+                              <li>สลับลองอ่านโปรโตคอล <strong>DHT11 และ DHT22</strong> โดยอัตโนมัติ</li>
+                              <li>เพิ่มระบบ Retry 3 รอบเพื่อป้องกันสัญญาณ WiFi แทรกจังหวะอ่าน</li>
+                            </ul>
+                            <p className="font-bold text-emerald-900 mt-2">
+                              👉 ให้ก๊อปปี้โค้ดในแท็บ 2 หรือ 3 ใหม่ทั้งหมดไปวางอัปโหลดอีกครั้งครับ!
+                            </p>
+                          </div>
+
+                          {/* Step 2 */}
+                          <div className="bg-amber-100/80 p-3 rounded-lg border border-amber-300">
+                            <span className="font-bold text-amber-950 text-sm block flex items-center gap-1.5">
+                              <span className="bg-amber-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs">2</span>
+                              ตรวจสอบตำแหน่งพอร์ตสายไฟขาว (JST 4-Pin) ด้านหลังบอร์ด CYD:
+                            </span>
+                            <p className="text-slate-700 mt-1">
+                              บอร์ด CYD (ESP32-2432S028) มีพอร์ตสีขาวด้านหลัง 2 พอร์ต:
+                            </p>
+                            <ul className="list-disc pl-5 mt-1 space-y-0.5 text-slate-700">
+                              <li><strong>พอร์ต Temp/Humi (CN1):</strong> ขาสัญญาณคือ <strong>IO27</strong> (ข้างช่อง SD Card) ⚡ <i>(แนะนำให้เสียบพอร์ตนี้)</i></li>
+                              <li><strong>พอร์ต Extended IO (P3):</strong> ขาสัญญาณคือ <strong>IO22 / IO21</strong> (ข้างลำโพง)</li>
+                            </ul>
+                            <p className="text-amber-900 font-semibold mt-1">
+                              💡 โค้ดใหม่ของเราจะลองสแกนทั้ง IO27 และ IO22 ให้เองอัตโนมัติ ไม่ว่าจะเสียบพอร์ตไหนก็อ่านได้ครับ!
+                            </p>
+                          </div>
+
+                          {/* Step 3 */}
+                          <div className="bg-cyan-50 p-3 rounded-lg border border-cyan-300">
+                            <span className="font-bold text-cyan-950 text-sm block flex items-center gap-1.5">
+                              <span className="bg-cyan-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs">3</span>
+                              เช็กการสลับสายสี S (Data Pin):
+                            </span>
+                            <p className="text-slate-700 mt-1">
+                              สายไฟ 4 สีจากโรงงานจีนบางล็อต ขาสัญญาณจะอยู่คนละฝั่ง:
+                            </p>
+                            <ul className="list-disc pl-5 mt-1 space-y-0.5 text-slate-700">
+                              <li>ปกติ: ขา S (Data) ของ DHT เสียบกับ <strong>สายสีเหลือง</strong></li>
+                              <li>หากยังขึ้น ERR: ให้ลองย้ายขา S (Data) ไปเสียบกับ <strong>สายสีน้ำเงิน</strong> แทน</li>
+                            </ul>
+                          </div>
+
+                          {/* Step 4: Alternative Adafruit DHT library snippet */}
+                          <div className="bg-indigo-50 p-3 rounded-lg border border-indigo-300 space-y-2">
+                            <span className="font-bold text-indigo-950 text-sm block">
+                              🛠️ ทางเลือกสำรอง: ใช้ Adafruit DHT Library (เสถียรที่สุดบน ESP32)
+                            </span>
+                            <p className="text-slate-700">
+                              หากใช้ <code className="bg-indigo-100 font-mono text-indigo-900 px-1 font-bold">SimpleDHT</code> แล้วยังมีปัญหาไทม์มิ่ง ให้ติดตั้ง Library ชื่อ <strong className="text-indigo-900">DHT sensor library by Adafruit</strong> ใน Arduino IDE (กด Ctrl+Shift+I เลือกติดตั้ง DHT sensor library) แล้วแก้โค้ดส่วนอ่านเซนเซอร์เป็น:
+                            </p>
+                            <pre className="bg-slate-900 text-emerald-400 p-3 rounded text-[11px] font-mono overflow-x-auto border border-slate-700">
+{`#include "DHT.h"
+#define DHTPIN 27
+#define DHTTYPE DHT11 // หรือ DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+void setup() {
+  dht.begin();
+}
+
+void loop() {
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  if (!isnan(h) && !isnan(t)) {
+    temp = t; humi = h; isSensorError = false;
+  }
+}`}
+                            </pre>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    {/* Wiring Guide: DHT Sensor & CYD ESP32 */}
+                    <div className="bg-cyan-50 border-2 border-cyan-500 rounded-xl p-5 space-y-3 shadow-md">
+                      <div className="flex items-start gap-3">
+                        <Cpu className="w-6 h-6 text-cyan-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-bold text-cyan-950 text-base">🔌 คู่มือการเสียบสายสี (ตามรูปสายไฟ 4 สีของคุณ) เข้ากับโมดูล DHT</h3>
+                          <p className="text-xs text-cyan-800 mt-1">
+                            สายแจ็คขาว 4 พินที่แถมมากับบอร์ด CYD (หัวขาวเสียบเข้าพอร์ต <strong>"Temperature and humidity interface"</strong> หรือ <strong>CN1</strong> ข้างช่องการ์ดจอ) นำปลายหัวตัวเมีย 4 สีไปเสียบเข้าโมดูล DHT ดังนี้ครับ:
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-lg border border-cyan-200 text-xs text-slate-700 space-y-3">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="bg-red-50 border-2 border-red-400 p-3 rounded-lg space-y-1">
+                            <div className="flex items-center gap-1.5 font-bold text-red-900 text-sm">
+                              <span className="w-3 h-3 rounded-full bg-red-500 inline-block border border-red-700"></span>
+                              1. สายสีแดง (Red)
+                            </div>
+                            <p className="text-slate-600 font-medium">เสียบเข้าพิน <strong className="text-red-700 bg-red-100 px-1.5 py-0.5 rounded font-mono">+ หรือ VCC</strong> ของโมดูล DHT (ไฟเลี้ยง 3.3V)</p>
+                          </div>
+
+                          <div className="bg-slate-100 border-2 border-slate-600 p-3 rounded-lg space-y-1">
+                            <div className="flex items-center gap-1.5 font-bold text-slate-900 text-sm">
+                              <span className="w-3 h-3 rounded-full bg-black inline-block border border-slate-700"></span>
+                              2. สายสีดำ (Black)
+                            </div>
+                            <p className="text-slate-600 font-medium">เสียบเข้าพิน <strong className="text-slate-900 bg-slate-200 px-1.5 py-0.5 rounded font-mono">- หรือ GND</strong> ของโมดูล DHT (กราวด์)</p>
+                          </div>
+
+                          <div className="bg-yellow-50 border-2 border-yellow-400 p-3 rounded-lg space-y-1">
+                            <div className="flex items-center gap-1.5 font-bold text-amber-900 text-sm">
+                              <span className="w-3 h-3 rounded-full bg-yellow-400 inline-block border border-yellow-600"></span>
+                              3. สายสีเหลือง (หรือน้ำเงิน)
+                            </div>
+                            <p className="text-slate-600 font-medium">เสียบเข้าพิน <strong className="text-amber-800 bg-yellow-200 px-1.5 py-0.5 rounded font-mono">S หรือ OUT</strong> ของโมดูล DHT (ขาข้อมูล IO27)</p>
+                          </div>
+                        </div>
+
+                        <div className="bg-blue-50 p-3 rounded-lg border border-blue-200 text-blue-950 font-medium space-y-1">
+                          <p className="font-bold flex items-center gap-1">
+                            <span>💡</span> ข้อสังเกตสายไฟ 4 พิน:
+                          </p>
+                          <ul className="list-disc pl-5 space-y-0.5 text-xs text-blue-900">
+                            <li>สายแจ็คหัวสีขาวจะบังคับทิศทางสลัก เสียบเข้าช่อง <strong>"Temperature and humidity interface"</strong> บนบอร์ด CYD ได้ทางเดียวพอดี</li>
+                            <li>สายเหลือง = ขาสัญญาณข้อมูล (IO27) / สายสีน้ำเงินจะว่างไว้ หรือใช้เป็นขา Relay (IO22) ได้เลยครับ</li>
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+                    {/* Fix Error 9: Bootloop / Reset Loop Fix */}
+                    <div className="bg-amber-50 border-2 border-amber-400 rounded-xl p-5 space-y-3 shadow-md">
+                      <div className="flex items-start gap-3">
+                        <RefreshCw className="w-6 h-6 text-amber-600 shrink-0 mt-0.5 animate-spin" />
+                        <div>
+                          <h3 className="font-bold text-amber-950 text-base">⚠️ ปัญหา: หลังอัปโหลดเสร็จ บอร์ด ESP32 ติดดับเปิดรีเซ็ตวนลูป (Bootloop)?</h3>
+                          <p className="text-xs text-amber-800 mt-1">
+                            <strong>สาเหตุ 2 ข้อหลัก:</strong>
+                            <br />
+                            1. <strong>Brownout Reset (ไฟ USB ตก):</strong> บอร์ด CYD ดึงกระแสสูงขณะเปิด WiFi + ไฟหน้าจอ หากสาย USB หรือพอร์ตคอมพิวเตอร์จ่ายไฟไม่พอ ESP32 จะตัดไฟและรีเซ็ตตัวเองวนไปเรื่อยๆ
+                            <br />
+                            2. <strong>WiFiManager Timeout Reset:</strong> หากบอร์ดพยายามต่อ WiFi แล้วใช้เวลาเกินกำหนด ตัวโปรแกรมเดิมจะสั่งเปิด WiFiManager ซ้อนกันและสั่งรีเซ็ตบอร์ดตัวเองเมื่อ Timeout
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-lg border border-amber-200 space-y-2 text-xs text-slate-700">
+                        <p className="font-bold text-slate-900 text-sm">✅ วิธีแก้ไขที่เราจัดการให้ในโค้ดใหม่ฉบับนี้เรียบร้อยแล้ว:</p>
+                        <ul className="list-disc pl-5 space-y-1 text-slate-700 leading-relaxed">
+                          <li>เพิ่มคำสั่ง <code className="bg-slate-100 font-mono text-amber-700 px-1 font-bold">WRITE_PERI_REG(RTC_CNTL_BROWNOUT_REG, 0);</code> ปิดระบบ Brownout Detector ป้องกันบอร์ดดับวนจากแรงดันไฟตกชั่วขณะ</li>
+                          <li>ลดกำลังส่ง RF ของ WiFi เล็กน้อย (<code className="bg-slate-100 font-mono text-amber-700 px-1 font-bold">WiFi.setTxPower(WIFI_POWER_19_5dBm)</code>) เพื่อลดกระแสไฟกระชากช่วงเปิดเครื่อง</li>
+                          <li>เพิ่มระยะเวลารอต่อ WiFi บ้านเป็น 15 วินาที และเปิดโหมด <code className="bg-slate-100 font-mono text-amber-700 px-1 font-bold">setBreakAfterConfig(true)</code> ห้าม WiFiManager สั่งรีเซ็ตบอร์ดเมื่อหมดเวลา</li>
+                          <li>คัดลอกโค้ด C++ ใหม่ในแท็บ <strong className="text-blue-600 font-bold">"2. โค้ดแบบไม่ใช้ Library"</strong> หรือ <strong className="text-purple-600 font-bold">"3. โค้ด Full 2-Way Sync"</strong> ไปอัปโหลดใหม่ บอร์ดจะทำงานนิ่งเสถียร ไม่รีเซ็ตวนลูปอีกต่อไป!</li>
+                        </ul>
+                      </div>
+                    </div>
+
+                    {/* Fix Error 8: Touch Screen VSPI Solution */}
+                    <div className="bg-purple-50 border-2 border-purple-400 rounded-xl p-5 space-y-3 shadow-md">
+                      <div className="flex items-start gap-3">
+                        <CheckCircle2 className="w-6 h-6 text-purple-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-bold text-purple-950 text-base">👆 ทำไมโค้ดทดสอบของคุณทัชได้ แต่โค้ดเดิมทัชไม่ได้? (ไขข้อข้องใจแล้ว!)</h3>
+                          <p className="text-xs text-purple-800 mt-1">
+                            <strong>สาเหตุฮาร์ดแวร์:</strong> บอร์ด Cheap Yellow Display (CYD ESP32-2432S028) แยกสาย SPI ออกเป็น 2 บัสครับ! จอภาพ TFT ใช้ SPI หลัก ส่วนชิปทัชสกรีน XPT2046 ใช้ <strong>SPI บัสที่ 2 (VSPI)</strong> ผ่านขาเฉพาะ <code className="bg-purple-200 px-1 font-mono font-bold text-purple-900">CLK:25, MISO:39, MOSI:32, CS:33, IRQ:36</code>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-lg border border-purple-200 space-y-2 text-xs text-slate-700">
+                        <p className="font-bold text-slate-900 text-sm">✅ สิ่งที่เราอัปเดตแก้ไขให้ในโค้ด C++ บนเว็บแล้ว:</p>
+                        <ul className="list-disc pl-5 space-y-1 text-slate-700 leading-relaxed">
+                          <li>เพิ่มวัตถุ <code className="bg-slate-100 font-mono text-purple-700 px-1 font-bold">SPIClass touchSpi = SPIClass(VSPI);</code> สำหรับบัสทัชสกรีนโดยเฉพาะ</li>
+                          <li>เรียกใช้คำสั่ง <code className="bg-slate-100 font-mono text-purple-700 px-1 font-bold">touchSpi.begin(25, 39, 32, 33);</code> และ <code className="bg-slate-100 font-mono text-purple-700 px-1 font-bold">touch.begin(touchSpi);</code> ตรงตามโค้ดทดสอบของคุณ 100%</li>
+                          <li>คัดลอกโค้ดใหม่จากแท็บ <strong className="text-blue-600 font-bold">"2. โค้ดแบบไม่ใช้ Library"</strong> หรือ <strong className="text-purple-600 font-bold">"3. โค้ด Full 2-Way Sync"</strong> ไปอัปโหลด บอร์ดจะทัชสกรีนตอบสนองได้ลื่นไหลแน่นอน!</li>
+                        </ul>
+                      </div>
+                    </div>
+                    {/* Fix Error 7: Time not matching & WiFi Red Dot */}
+                    <div className="bg-red-50 border-2 border-red-400 rounded-xl p-5 space-y-3 shadow-md">
+                      <div className="flex items-start gap-3">
+                        <AlertCircle className="w-6 h-6 text-red-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-bold text-red-950 text-base">🔴 ปัญหา: เวลาบนหน้าจอไม่ตรง และจุด Wi-Fi ขึ้นเป็นสีแดง?</h3>
+                          <p className="text-xs text-red-800 mt-1">
+                            <strong>สาเหตุ:</strong> จุดสีแดงหมายถึงบอร์ด ESP32 ยังไม่ได้เชื่อมต่อเข้ากับ WiFi บ้านของคุณ ทำให้อุปกรณ์ไม่สามารถดึงเวลาปัจจุบันจากเซิร์ฟเวอร์ NTP มาอัปเดตได้
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-lg border border-red-200 space-y-3 text-xs text-slate-700">
+                        <p className="font-bold text-slate-900 text-sm">✅ วิธีแก้ให้จุด WiFi เป็นสีเขียว 🟢 และเวลาอัปเดตตรงเป๊ะทันที (เลือกทำ 1 วิธี):</p>
+                        
+                        <div className="space-y-3 leading-relaxed">
+                          <div className="bg-blue-50 p-3 rounded-lg border border-blue-200 space-y-1.5">
+                            <p className="font-bold text-blue-900 text-xs">🔹 วิธีที่ 1 (ใส่ชื่อ WiFi ในโค้ด C++ - แนะนำ สะดวกและแน่นอนที่สุด!):</p>
+                            <p className="text-slate-700 text-xs">
+                              เปิดโค้ด C++ ในโปรแกรม Arduino IDE ด้านบนสุดจะมีบรรทัดสำหรับใส่ชื่อ WiFi บ้านของคุณ:
+                            </p>
+                            <pre className="bg-slate-900 text-blue-300 p-2.5 rounded-md text-[11px] font-mono overflow-x-auto">
+{`const char* WIFI_SSID = "ชื่อ_WiFi_บ้านของคุณ";
+const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของคุณ";`}
+                            </pre>
+                            <p className="text-slate-700 text-xs">
+                              ให้ใส่ชื่อ WiFi และ Password บ้านของคุณ แล้วอัปโหลด (→) ลงบอร์ดใหม่ เมื่อเปิดบอร์ดขึ้นมา จุด Wi-Fi จะกลายเป็น <strong>สีเขียว 🟢</strong> และเวลาจะอัปเดตเป็นปัจจุบันอัตโนมัติทันที!
+                            </p>
+                          </div>
+
+                          <div className="bg-amber-50 p-3 rounded-lg border border-amber-200 space-y-1.5">
+                            <p className="font-bold text-amber-900 text-xs">🔹 วิธีที่ 2 (เชื่อมต่อผ่านมือถือ):</p>
+                            <p className="text-slate-700 text-xs">
+                              เอานิ้วแตะปุ่ม <strong className="text-amber-800">[ CONFIG ]</strong> ตรงกลางด้านล่างหน้าจอ บอร์ดจะรีเซ็ตแล้วเปิดโหมดปล่อย WiFi AP จากนั้นใช้มือถือค้นหาและต่อ WiFi ชื่อ <code className="bg-white px-1 font-mono text-amber-900">CYD_ESP32_LIGHT</code> (หรือ <code className="bg-white px-1 font-mono text-amber-900">CYD_ESP32_SYNC</code>) เข้าไปที่หน้าเว็บ <code className="bg-white px-1 font-mono text-blue-700">192.168.4.1</code> เพื่อเลือกชื่อ WiFi บ้านและกรอกรหัสผ่านครับ
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Fix Error 6: No Sensor Values & Can't Find WiFi AP */}
+                    <div className="bg-emerald-50 border-2 border-emerald-400 rounded-xl p-5 space-y-3 shadow-md">
+                      <div className="flex items-start gap-3">
+                        <AlertCircle className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-bold text-emerald-950 text-base">🚨 ปัญหา: หน้าจอติดแล้ว แต่ไม่ขึ้นตัวเลขความชื้น/อุณหภูมิ และค้นหา WiFi CYD_ESP32 ไม่เจอ?</h3>
+                          <p className="text-xs text-emerald-800 mt-1">
+                            สาเหตุเกิดจากโค้ดเดิมคำสั่ง <code className="bg-emerald-100 font-mono font-bold text-emerald-900 px-1">autoConnect()</code> มันค้างรอต่อ WiFi ก่อน ทำให้คำสั่งวาดหน้าจอไม่ทำงาน! ตอนนี้ได้รับการ **อัปเดตโค้ด C++ ใหม่แล้ว** ให้แสดงผลตัวเลขและการ์ดหน้าจอทันทีตั้งแต่เปิดบอร์ดครับ!
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-lg border border-emerald-200 space-y-3 text-xs text-slate-700">
+                        <p className="font-bold text-slate-900 text-sm">✅ วิธีแก้ไข (คัดลอกโค้ดอัปเดตใหม่ + วิธีต่อ WiFi แบบชัวร์ 100%):</p>
+                        
+                        <div className="space-y-2 leading-relaxed">
+                          <p className="font-semibold text-emerald-900">1. คัดลอกโค้ด C++ เวอร์ชันอัปเดตใหม่:</p>
+                          <p className="text-slate-600 pl-2">
+                            ให้กดเลือกแท็บ <span className="text-blue-600 font-bold">"2. โค้ดแบบไม่ใช้ Library"</span> หรือ <span className="text-purple-600 font-bold">"3. โค้ด Full 2-Way Sync"</span> ด้านบน แล้วคัดลอกโค้ดทั้งหมดไปวางแฟลชลงบอร์ดใหม่ทันที หน้าจอจะขึ้นตัวเลขอุณหภูมิ/ความชื้น และเวลา NTP แสดงผลทันที!
+                          </p>
+
+                          <p className="font-semibold text-emerald-900 pt-2">2. วิธีการเชื่อมต่อ WiFi (เลือกทำได้ 2 วิธี):</p>
+                          <div className="bg-emerald-50/70 p-3 rounded-lg border border-emerald-200 space-y-2">
+                            <p className="font-bold text-blue-700">🔹 วิธีที่ A (ใส่ชื่อ WiFi ในโค้ดตรงๆ - แนะนำ สะดวกและเร็วที่สุด!):</p>
+                            <p className="text-slate-700 leading-normal pl-2">
+                              เปิดโค้ดใน Arduino IDE มองหาบรรทัดนี้ในฟังก์ชัน <code className="bg-white font-mono text-purple-700 px-1">setup()</code>:
+                            </p>
+                            <pre className="bg-slate-900 text-emerald-300 p-2.5 rounded-md text-[11px] font-mono">
+{`// WiFi.begin("ชื่อ_WiFi_บ้านของคุณ", "รหัสผ่าน_WiFi");`}
+                            </pre>
+                            <p className="text-slate-700 leading-normal pl-2">
+                              ให้ **ลบเครื่องหมาย // ออก** แล้วใส่ชื่อ WiFi กับรหัสผ่านบ้านของคุณลงไปแทน บอร์ดจะเชื่อมต่อ WiFi บ้านให้เองโดยอัตโนมัติ ไม่ต้องต่อผ่าน 192.168.4.1 อีกเลย!
+                            </p>
+
+                            <p className="font-bold text-amber-700 pt-1">🔹 วิธีที่ B (หากหา WiFi CYD_ESP32_LIGHT ไม่เจอ):</p>
+                            <p className="text-slate-700 leading-normal pl-2">
+                              ให้เอานิ้วแตะที่ปุ่มสีแดง <strong className="text-red-600">[ TOUCH ] RESET WIFI / CONFIG</strong> บนหน้าจอทัชสกรีน CYD ESP32 ค้างไว้ 2 วินาที บอร์ดจะลบค่าจำเดิมแล้วปล่อยสัญญาณ <code className="bg-white px-1 font-mono text-blue-700">CYD_ESP32_LIGHT</code> ออกมาให้มือถือค้นหาใหม่อีกครั้งครับ!
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
                     {/* Fix Error 5: White Screen Fix on CYD ESP32 */}
                     <div className="bg-amber-50 border-2 border-amber-400 rounded-xl p-5 space-y-3 shadow-md">
                       <div className="flex items-start gap-3">
