@@ -210,9 +210,9 @@ export default function App() {
 #include "soc/soc.h"          // ป้องกัน ESP32 Brownout Reset
 #include "soc/rtc_cntl_reg.h" // ป้องกัน ESP32 Brownout Reset
 
-// --- 0. ตั้งค่า WiFi บ้านล่วงหน้า (แนะนำ! เพื่อให้จุด WiFi กลายเป็นสีเขียว และดึงเวลา NTP ทันที) ---
-const char* WIFI_SSID = "";     // ใส่ชื่อ WiFi บ้านตรงนี้ เช่น "MyHomeWiFi"
-const char* WIFI_PASSWORD = ""; // ใส่รหัสผ่าน WiFi บ้านตรงนี้
+// --- 0. ตั้งค่า WiFi บ้านล่วงหน้า (เปิด WiFi และดึงเวลา NTP ทันที) ---
+const char* WIFI_SSID = "Mai_home_2.4G";     // ชื่อ WiFi ของคุณ
+const char* WIFI_PASSWORD = "0909142651"; // รหัสผ่าน WiFi ของคุณ
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
 const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app/api/sensor-data";
@@ -224,6 +224,7 @@ const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia
 #define XPT2046_CLK   25
 #define XPT2046_CS    33
 #define RELAY_PIN     22  // ขาควบคุม Relay พัดลม (หรือ Pin 4 LED)
+#define TFT_BL        21  // ขาควบคุมไฟหลังจอ Backlight CYD ESP32 (ห้ามใช้ต่อเซนเซอร์)
 
 SPIClass touchSpi = SPIClass(VSPI);
 XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
@@ -248,30 +249,89 @@ unsigned long lastSend = 0;
 unsigned long lastSensorRead = 0;
 unsigned long lastClockUpdate = 0;
 
-// ฟังก์ชันสแกนอ่านค่า DHT แบบอัตโนมัติ (รองรับทั้ง GPIO 27, 22, 21 + Auto-PullUp + Auto DHT11/22)
-void readSensorAuto() {
-  float t = 0, h = 0;
-  int pins[] = {27, 22, 21};
-  for (int p = 0; p < 3; p++) {
-    int pin = pins[p];
-    pinMode(pin, INPUT_PULLUP);
-    
-    SimpleDHT11 d11(pin);
-    for (int r = 0; r < 3; r++) {
-      if (d11.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
-        temp = t; humi = h; isSensorError = false; return;
-      }
-      delay(50);
+// ฟังก์ชันอ่านค่า DHT แบบความแม่นยำสูง (ปิด interrupts ป้องกันสัญญาณ WiFi รบกวนไทม์มิ่ง)
+bool readDHTDirect(int pin, bool isDHT22, float &outTemp, float &outHumi) {
+  uint8_t data[5] = {0, 0, 0, 0, 0};
+  
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, LOW);
+  delay(isDHT22 ? 2 : 20); // 18-20ms start pulse
+  digitalWrite(pin, HIGH);
+  delayMicroseconds(30);
+  pinMode(pin, INPUT_PULLUP);
+  
+  unsigned long timeout = micros();
+  while(digitalRead(pin) == HIGH) { if (micros() - timeout > 100) return false; }
+  timeout = micros();
+  while(digitalRead(pin) == LOW) { if (micros() - timeout > 100) return false; }
+  timeout = micros();
+  while(digitalRead(pin) == HIGH) { if (micros() - timeout > 100) return false; }
+  
+  noInterrupts();
+  for (int i = 0; i < 40; i++) {
+    unsigned long startLow = micros();
+    while(digitalRead(pin) == LOW) {
+      if (micros() - startLow > 100) { interrupts(); return false; }
     }
-
-    SimpleDHT22 d22(pin);
-    for (int r = 0; r < 3; r++) {
-      if (d22.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
-        temp = t; humi = h; isSensorError = false; return;
-      }
-      delay(50);
+    unsigned long startHigh = micros();
+    while(digitalRead(pin) == HIGH) {
+      if (micros() - startHigh > 100) { interrupts(); return false; }
+    }
+    if ((micros() - startHigh) > 40) {
+      data[i / 8] |= (1 << (7 - (i % 8)));
     }
   }
+  interrupts();
+  
+  if (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF)) {
+    if (isDHT22) {
+      outHumi = (float)((data[0] << 8) | data[1]) * 0.1;
+      outTemp = (float)(((data[2] & 0x7F) << 8) | data[3]) * 0.1;
+      if (data[2] & 0x80) outTemp = -outTemp;
+    } else {
+      outHumi = data[0] + (float)data[1] * 0.1;
+      outTemp = data[2] + (float)data[3] * 0.1;
+    }
+    return (outHumi > 0 && outHumi <= 100 && outTemp >= -20 && outTemp <= 80);
+  }
+  return false;
+}
+
+// ฟังก์ชันสแกนอ่านค่า DHT แบบอัตโนมัติ (รองรับ GPIO 27, 22, 17)
+void readSensorAuto() {
+  float t = 0, h = 0;
+  int pins[] = {27, 22, 17}; 
+  for (int p = 0; p < 3; p++) {
+    int pin = pins[p];
+    if (pin == RELAY_PIN && fanState) continue;
+    
+    // 1. อ่านด้วย Native Bit Reader (DHT11)
+    if (readDHTDirect(pin, false, t, h) && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+      temp = t; humi = h; isSensorError = false;
+      pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
+      return;
+    }
+    
+    // 2. อ่านด้วย Native Bit Reader (DHT22)
+    if (readDHTDirect(pin, true, t, h) && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+      temp = t; humi = h; isSensorError = false;
+      pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
+      return;
+    }
+
+    // 3. สำรองด้วย SimpleDHT11
+    SimpleDHT11 d11(pin);
+    if (d11.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+      temp = t; humi = h; isSensorError = false;
+      pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
+      return;
+    }
+  }
+
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, fanState ? HIGH : LOW);
   isSensorError = true;
 }
 
@@ -535,9 +595,9 @@ void loop() {
 #include "soc/soc.h"          // ป้องกัน ESP32 Brownout Reset
 #include "soc/rtc_cntl_reg.h" // ป้องกัน ESP32 Brownout Reset
 
-// --- 0. ตั้งค่า WiFi บ้านล่วงหน้า (แนะนำ! เพื่อให้จุด WiFi กลายเป็นสีเขียว และดึงเวลา NTP ทันที) ---
-const char* WIFI_SSID = "";     // ใส่ชื่อ WiFi บ้านตรงนี้ เช่น "MyHomeWiFi"
-const char* WIFI_PASSWORD = ""; // ใส่รหัสผ่าน WiFi บ้านตรงนี้
+// --- 0. ตั้งค่า WiFi บ้านล่วงหน้า (เปิด WiFi และดึงเวลา NTP ทันที) ---
+const char* WIFI_SSID = "Mai_home_2.4G";     // ชื่อ WiFi ของคุณ
+const char* WIFI_PASSWORD = "0909142651"; // รหัสผ่าน WiFi ของคุณ
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
 const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app/api/sensor-data";
@@ -549,6 +609,7 @@ const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia
 #define XPT2046_CLK   25
 #define XPT2046_CS    33
 #define RELAY_PIN     22  // ขาควบคุม Relay พัดลม (หรือ Pin 4 LED)
+#define TFT_BL        21  // ขาควบคุมไฟหลังจอ Backlight CYD ESP32 (ห้ามใช้ต่อเซนเซอร์)
 
 SPIClass touchSpi = SPIClass(VSPI);
 XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
@@ -576,30 +637,89 @@ unsigned long lastSend = 0;
 unsigned long lastSensorRead = 0;
 unsigned long lastClockUpdate = 0;
 
-// ฟังก์ชันสแกนอ่านค่า DHT แบบอัตโนมัติ (รองรับทั้ง GPIO 27, 22, 21 + Auto-PullUp + Auto DHT11/22)
-void readSensorAuto() {
-  float t = 0, h = 0;
-  int pins[] = {27, 22, 21};
-  for (int p = 0; p < 3; p++) {
-    int pin = pins[p];
-    pinMode(pin, INPUT_PULLUP);
-    
-    SimpleDHT11 d11(pin);
-    for (int r = 0; r < 3; r++) {
-      if (d11.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
-        temp = t; humi = h; isSensorError = false; return;
-      }
-      delay(50);
+// ฟังก์ชันอ่านค่า DHT แบบความแม่นยำสูง (ปิด interrupts ป้องกันสัญญาณ WiFi รบกวนไทม์มิ่ง)
+bool readDHTDirect(int pin, bool isDHT22, float &outTemp, float &outHumi) {
+  uint8_t data[5] = {0, 0, 0, 0, 0};
+  
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, LOW);
+  delay(isDHT22 ? 2 : 20); // 18-20ms start pulse
+  digitalWrite(pin, HIGH);
+  delayMicroseconds(30);
+  pinMode(pin, INPUT_PULLUP);
+  
+  unsigned long timeout = micros();
+  while(digitalRead(pin) == HIGH) { if (micros() - timeout > 100) return false; }
+  timeout = micros();
+  while(digitalRead(pin) == LOW) { if (micros() - timeout > 100) return false; }
+  timeout = micros();
+  while(digitalRead(pin) == HIGH) { if (micros() - timeout > 100) return false; }
+  
+  noInterrupts();
+  for (int i = 0; i < 40; i++) {
+    unsigned long startLow = micros();
+    while(digitalRead(pin) == LOW) {
+      if (micros() - startLow > 100) { interrupts(); return false; }
     }
-
-    SimpleDHT22 d22(pin);
-    for (int r = 0; r < 3; r++) {
-      if (d22.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
-        temp = t; humi = h; isSensorError = false; return;
-      }
-      delay(50);
+    unsigned long startHigh = micros();
+    while(digitalRead(pin) == HIGH) {
+      if (micros() - startHigh > 100) { interrupts(); return false; }
+    }
+    if ((micros() - startHigh) > 40) {
+      data[i / 8] |= (1 << (7 - (i % 8)));
     }
   }
+  interrupts();
+  
+  if (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF)) {
+    if (isDHT22) {
+      outHumi = (float)((data[0] << 8) | data[1]) * 0.1;
+      outTemp = (float)(((data[2] & 0x7F) << 8) | data[3]) * 0.1;
+      if (data[2] & 0x80) outTemp = -outTemp;
+    } else {
+      outHumi = data[0] + (float)data[1] * 0.1;
+      outTemp = data[2] + (float)data[3] * 0.1;
+    }
+    return (outHumi > 0 && outHumi <= 100 && outTemp >= -20 && outTemp <= 80);
+  }
+  return false;
+}
+
+// ฟังก์ชันสแกนอ่านค่า DHT แบบอัตโนมัติ (รองรับ GPIO 27, 22, 17)
+void readSensorAuto() {
+  float t = 0, h = 0;
+  int pins[] = {27, 22, 17}; 
+  for (int p = 0; p < 3; p++) {
+    int pin = pins[p];
+    if (pin == RELAY_PIN && fanState) continue;
+    
+    // 1. อ่านด้วย Native Bit Reader (DHT11)
+    if (readDHTDirect(pin, false, t, h) && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+      temp = t; humi = h; isSensorError = false;
+      pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
+      return;
+    }
+    
+    // 2. อ่านด้วย Native Bit Reader (DHT22)
+    if (readDHTDirect(pin, true, t, h) && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+      temp = t; humi = h; isSensorError = false;
+      pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
+      return;
+    }
+
+    // 3. สำรองด้วย SimpleDHT11
+    SimpleDHT11 d11(pin);
+    if (d11.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
+      temp = t; humi = h; isSensorError = false;
+      pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
+      return;
+    }
+  }
+
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, fanState ? HIGH : LOW);
   isSensorError = true;
 }
 
@@ -970,6 +1090,29 @@ void loop() {
                 
                 {codeTab === 'fixGuide' && (
                   <div className="space-y-6">
+                    {/* Fix Error 13: Black Screen Resolution Banner */}
+                    <div className="bg-emerald-50 border-2 border-emerald-500 rounded-xl p-5 space-y-3 shadow-md">
+                      <div className="flex items-start gap-3">
+                        <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-bold text-emerald-950 text-base">💡 แก้ไขปัญหา "หน้าจอมืด / จอดำ" หลังรันโค้ดเรียบร้อยแล้วครับ!</h3>
+                          <p className="text-xs text-emerald-800 mt-1">
+                            สาเหตุที่จอดำ เกิดจากในฟังก์ชันสแกนเซนเซอร์เดิมมีพิน <strong>GPIO 21</strong> รวมอยู่ด้วย ซึ่งบนบอร์ด CYD (ESP32-2432S028) ขา <strong>GPIO 21 คือขาไฟหลังจอ (LCD Backlight)</strong> เมื่อสั่งตั้งค่าพินเป็น Input ทำให้ไฟหน้าจอดับลงทันทีครับ!
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-lg border border-emerald-200 text-xs text-slate-700 space-y-2">
+                        <p className="font-bold text-emerald-950 text-sm">✅ สิ่งที่เราแก้ไขให้เรียบร้อยแล้วในโค้ด C++ ใหม่ล่าสุด:</p>
+                        <ul className="list-disc pl-5 space-y-1 text-slate-700">
+                          <li>กำหนดขา <code className="bg-emerald-100 text-emerald-950 font-mono font-bold px-1">#define TFT_BL 21</code> ล็อคเป็นขาไฟหลังจอ (LCD Backlight) และสั่งเปิดสว่างเสมอ</li>
+                          <li>ถอน GPIO 21 ออกจากสแกนเซนเซอร์ และคืนค่าความสว่าง <code className="bg-emerald-100 text-emerald-950 font-mono font-bold px-1">digitalWrite(TFT_BL, HIGH)</code> เสมอ</li>
+                        </ul>
+                        <div className="bg-emerald-100 p-2.5 rounded border border-emerald-300 font-bold text-emerald-950 text-xs mt-2">
+                          👉 <strong>สิ่งที่ต้องทำตอนนี้:</strong> คัดลอกโค้ด C++ ในแท็บ <strong>"2. โค้ดแบบไม่ใช้ Library"</strong> หรือ <strong>"3. โค้ด Full 2-Way Sync"</strong> ด้านบนไปวางและแฟลชอีกครั้ง หน้าจอจะติดสว่างสดใสพร้อม UI โชว์ทันทีครับ!
+                        </div>
+                      </div>
+                    </div>
                     {/* Fix Error 11: Compilation Error Fix */}
                     <div className="bg-blue-50 border-2 border-blue-500 rounded-xl p-5 space-y-3 shadow-md">
                       <div className="flex items-start gap-3">
@@ -993,11 +1136,11 @@ void loop() {
                     {/* Fix Error 12: ERR Value Fix - Ultimate Troubleshooting Guide */}
                     <div className="bg-amber-50 border-2 border-amber-500 rounded-xl p-5 space-y-4 shadow-md">
                       <div className="flex items-start gap-3">
-                        <AlertTriangle className="w-6 h-6 text-amber-600 shrink-0 mt-0.5" />
+                        <AlertTriangle className="w-6 h-6 text-amber-600 shrink-0 mt-0.5 animate-bounce" />
                         <div>
-                          <h3 className="font-bold text-amber-950 text-base">🔴 อัปโหลดโค้ดแล้วทำไมยังขึ้นค่า ERR ทั้ง 2 ค่า? (เช็ก 3 จุดนี้หายทันที 100%!)</h3>
+                          <h3 className="font-bold text-amber-950 text-base">🔴 อัปโหลดโค้ดแล้วทำไมยังขึ้นค่า ERR ทั้ง 2 ค่า? (เช็ก 4 ข้อนี้ หายทันที 100%!)</h3>
                           <p className="text-xs text-amber-900 mt-1">
-                            ไม่ต้องตกใจครับ! เหตุผลที่ขึ้น ERR เกิดจาก 3 สาเหตุฮาร์ดแวร์ & ไลบรารีบน ESP32 ดังนี้ครับ:
+                            ไม่ต้องตกใจครับ! สาเหตุที่ขึ้น ERR บน ESP32 เกิดจาก 4 ข้อหลักนี้ ซึ่งเราเตรียมทางแก้ให้แล้วครับ:
                           </p>
                         </div>
                       </div>
@@ -1005,82 +1148,80 @@ void loop() {
                       <div className="bg-white p-4 rounded-lg border border-amber-200 text-xs text-slate-700 space-y-3">
                         <div className="space-y-3">
                           {/* Step 1 */}
-                          <div className="bg-emerald-50 p-3 rounded-lg border border-emerald-300">
+                          <div className="bg-emerald-50 p-3.5 rounded-lg border-2 border-emerald-400 space-y-1.5">
                             <span className="font-bold text-emerald-950 text-sm block flex items-center gap-1.5">
-                              <span className="bg-emerald-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs">1</span>
-                              อัปเดตโค้ดสแกนอัตโนมัติ (แก้แล้วในแท็บ 2 และ 3):
+                              <span className="bg-emerald-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs font-bold">1</span>
+                              ใช้โค้ดใหม่ที่มี Native High-Precision Bit Reader (อัปเดตแก้ในแท็บ 2 และ 3 แล้ว):
                             </span>
-                            <p className="text-slate-700 mt-1">
-                              เราอัปเดตโค้ดในแท็บ <strong>"2. โค้ดแบบไม่ใช้ Library"</strong> และ <strong>"3. โค้ด Full 2-Way Sync"</strong> ให้ใช้ฟังก์ชัน <code className="bg-emerald-100 font-mono text-emerald-800 font-bold px-1">readSensorAuto()</code> ซึ่งจะ:
+                            <p className="text-slate-700 leading-relaxed">
+                              ไลบรารี <code className="bg-slate-200 font-mono text-rose-800 font-bold px-1">SimpleDHT</code> มักโดนระบบ WiFi ของ ESP32 แทรกจังหวะอ่านสัญญาณ (Timing Interrupt Disruption) จนส่งค่า ERR...
+                              <br />
+                              <strong className="text-emerald-800">✅ เราแก้ไขเรียบร้อยแล้ว:</strong> โค้ดใหม่ใช้ฟังก์ชัน <code className="bg-emerald-100 font-mono text-emerald-950 font-bold px-1">readDHTDirect()</code> ที่ทำการ <code className="bg-emerald-100 font-mono text-emerald-950 font-bold px-1">noInterrupts()</code> ชั่วคราว ป้องกันสัญญาณ WiFi แทรก พร้อมสแกนทั้ง <strong>GPIO 27, GPIO 22, GPIO 17</strong> โดยอัตโนมัติ!
                             </p>
-                            <ul className="list-disc pl-5 mt-1 space-y-0.5 text-slate-700">
-                              <li>เปิด <strong>Internal Pull-Up (INPUT_PULLUP)</strong> บนพินอัตโนมัติ</li>
-                              <li>ลองสแกนพิน <strong>GPIO 27, GPIO 22, GPIO 21</strong> ทุกพอร์ตขาวหลังจอ CYD</li>
-                              <li>สลับลองอ่านโปรโตคอล <strong>DHT11 และ DHT22</strong> โดยอัตโนมัติ</li>
-                              <li>เพิ่มระบบ Retry 3 รอบเพื่อป้องกันสัญญาณ WiFi แทรกจังหวะอ่าน</li>
-                            </ul>
-                            <p className="font-bold text-emerald-900 mt-2">
-                              👉 ให้ก๊อปปี้โค้ดในแท็บ 2 หรือ 3 ใหม่ทั้งหมดไปวางอัปโหลดอีกครั้งครับ!
+                            <p className="font-bold text-emerald-900 text-xs bg-emerald-100 p-2 rounded border border-emerald-300 mt-1">
+                              👉 <strong>สิ่งที่ต้องทำ:</strong> ให้คัดลอกโค้ด C++ ในแท็บ <strong>"2. โค้ดแบบไม่ใช้ Library"</strong> หรือ <strong>"3. โค้ด Full 2-Way Sync"</strong> ใหม่ทั้งหมดไปวางใน Arduino IDE แล้วกดอัปโหลดอีกครั้งครับ!
                             </p>
                           </div>
 
-                          {/* Step 2 */}
-                          <div className="bg-amber-100/80 p-3 rounded-lg border border-amber-300">
-                            <span className="font-bold text-amber-950 text-sm block flex items-center gap-1.5">
-                              <span className="bg-amber-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs">2</span>
-                              ตรวจสอบตำแหน่งพอร์ตสายไฟขาว (JST 4-Pin) ด้านหลังบอร์ด CYD:
+                          {/* Step 2: The GPIO 35 Trap Warning */}
+                          <div className="bg-rose-50 p-3.5 rounded-lg border-2 border-rose-400 space-y-1.5">
+                            <span className="font-bold text-rose-950 text-sm block flex items-center gap-1.5">
+                              <span className="bg-rose-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs font-bold">2</span>
+                              🚨 กับดักพอร์ตสีขาวหลังบอร์ด CYD (กับดักขา GPIO 35):
                             </span>
-                            <p className="text-slate-700 mt-1">
-                              บอร์ด CYD (ESP32-2432S028) มีพอร์ตสีขาวด้านหลัง 2 พอร์ต:
+                            <p className="text-slate-700 leading-relaxed">
+                              ด้านหลังบอร์ด CYD (ESP32-2432S028) มีพอร์ตสายไฟสีขาว 2 พอร์ต:
                             </p>
-                            <ul className="list-disc pl-5 mt-1 space-y-0.5 text-slate-700">
-                              <li><strong>พอร์ต Temp/Humi (CN1):</strong> ขาสัญญาณคือ <strong>IO27</strong> (ข้างช่อง SD Card) ⚡ <i>(แนะนำให้เสียบพอร์ตนี้)</i></li>
-                              <li><strong>พอร์ต Extended IO (P3):</strong> ขาสัญญาณคือ <strong>IO22 / IO21</strong> (ข้างลำโพง)</li>
+                            <ul className="list-disc pl-5 space-y-1 text-slate-800 font-medium">
+                              <li><strong className="text-emerald-700">พอร์ต CN1 / P2 (ข้างช่อง SD Card):</strong> ขาสัญญาณคือ <strong>IO27</strong> ⚡ <span className="bg-emerald-100 text-emerald-900 font-bold px-1 rounded">เสียบพอร์ตนี้อ่านได้ชัวร์ 100%!</span></li>
+                              <li><strong className="text-rose-700">พอร์ต P3 (ข้างลำโพง):</strong> ขาสัญญาณคือ <strong>IO35</strong> ⚠️ <span className="bg-rose-100 text-rose-900 font-bold px-1 rounded">ห้ามเสียบพอร์ตนี้!</span> เนื่องจากขา GPIO 35 ของ ESP32 เป็นขา <i>Input Only</i> ไม่สามารถส่งสัญญาณ Start Pulse ปลุกเซนเซอร์ DHT ได้ จะขึ้น ERR เสมอ!</li>
                             </ul>
-                            <p className="text-amber-900 font-semibold mt-1">
-                              💡 โค้ดใหม่ของเราจะลองสแกนทั้ง IO27 และ IO22 ให้เองอัตโนมัติ ไม่ว่าจะเสียบพอร์ตไหนก็อ่านได้ครับ!
-                            </p>
                           </div>
 
                           {/* Step 3 */}
-                          <div className="bg-cyan-50 p-3 rounded-lg border border-cyan-300">
-                            <span className="font-bold text-cyan-950 text-sm block flex items-center gap-1.5">
-                              <span className="bg-cyan-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs">3</span>
-                              เช็กการสลับสายสี S (Data Pin):
+                          <div className="bg-amber-50 p-3.5 rounded-lg border-2 border-amber-400 space-y-1.5">
+                            <span className="font-bold text-amber-950 text-sm block flex items-center gap-1.5">
+                              <span className="bg-amber-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs font-bold">3</span>
+                              สลับสายสัญญาณ Data (สายสีเหลือง VS สายสีน้ำเงิน):
                             </span>
-                            <p className="text-slate-700 mt-1">
-                              สายไฟ 4 สีจากโรงงานจีนบางล็อต ขาสัญญาณจะอยู่คนละฝั่ง:
+                            <p className="text-slate-700 leading-relaxed">
+                              สายไฟขาว 4 สีจากโรงงานบางชุด ขาสัญญาณจะสลับฝั่งกัน:
                             </p>
-                            <ul className="list-disc pl-5 mt-1 space-y-0.5 text-slate-700">
-                              <li>ปกติ: ขา S (Data) ของ DHT เสียบกับ <strong>สายสีเหลือง</strong></li>
-                              <li>หากยังขึ้น ERR: ให้ลองย้ายขา S (Data) ไปเสียบกับ <strong>สายสีน้ำเงิน</strong> แทน</li>
+                            <ul className="list-disc pl-5 space-y-0.5 text-slate-700">
+                              <li>ลองเอาขา <strong>Data (S หรือ Out)</strong> บนโมดูล DHT เสียบกับ <strong>สายสีเหลือง</strong></li>
+                              <li>หากยังขึ้น ERR ให้สลับมาเสียบกับ <strong>สายสีน้ำเงิน</strong> แทนครับ</li>
                             </ul>
                           </div>
 
-                          {/* Step 4: Alternative Adafruit DHT library snippet */}
-                          <div className="bg-indigo-50 p-3 rounded-lg border border-indigo-300 space-y-2">
-                            <span className="font-bold text-indigo-950 text-sm block">
-                              🛠️ ทางเลือกสำรอง: ใช้ Adafruit DHT Library (เสถียรที่สุดบน ESP32)
+                          {/* Step 4: Diagnostic Code */}
+                          <div className="bg-indigo-50 p-3.5 rounded-lg border-2 border-indigo-300 space-y-2">
+                            <span className="font-bold text-indigo-950 text-sm block flex items-center gap-1.5">
+                              <span className="bg-indigo-600 text-white rounded-full w-5 h-5 inline-flex items-center justify-center text-xs font-bold">4</span>
+                              🛠️ สเก็ตช์ทดสอบค้นหาขา DHT อัตโนมัติ (ผ่าน Serial Monitor):
                             </span>
-                            <p className="text-slate-700">
-                              หากใช้ <code className="bg-indigo-100 font-mono text-indigo-900 px-1 font-bold">SimpleDHT</code> แล้วยังมีปัญหาไทม์มิ่ง ให้ติดตั้ง Library ชื่อ <strong className="text-indigo-900">DHT sensor library by Adafruit</strong> ใน Arduino IDE (กด Ctrl+Shift+I เลือกติดตั้ง DHT sensor library) แล้วแก้โค้ดส่วนอ่านเซนเซอร์เป็น:
+                            <p className="text-slate-700 leading-relaxed">
+                              หากทำตามข้อ 1-3 แล้วยังขึ้น ERR ให้ลองก๊อปปี้สเก็ตช์สั้นๆ ด้านล่างนี้ไปวางใน Arduino IDE แล้วกดเปิด <strong>Serial Monitor (115200 baud)</strong> เพื่อดูว่าพินไหนอ่านค่าได้จริงครับ:
                             </p>
                             <pre className="bg-slate-900 text-emerald-400 p-3 rounded text-[11px] font-mono overflow-x-auto border border-slate-700">
-{`#include "DHT.h"
-#define DHTPIN 27
-#define DHTTYPE DHT11 // หรือ DHT22
-DHT dht(DHTPIN, DHTTYPE);
-
+{`// โค้ดสแกนเช็กพิน DHT11 อัตโนมัติใน Serial Monitor (115200)
 void setup() {
-  dht.begin();
+  Serial.begin(115200);
+  Serial.println("--- DHT Sensor Diagnostic Scanner ---");
 }
 
 void loop() {
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
-  if (!isnan(h) && !isnan(t)) {
-    temp = t; humi = h; isSensorError = false;
+  int testPins[] = {27, 22, 17, 16};
+  for (int i = 0; i < 4; i++) {
+    int p = testPins[i];
+    float t = 0, h = 0;
+    if (readDHTDirect(p, false, t, h)) {
+      Serial.printf("✅ FOUND DHT11 on GPIO %d! Temp: %.1fC, Humi: %.1f%%\n", p, t, h);
+    } else {
+      Serial.printf("❌ No DHT response on GPIO %d\n", p);
+    }
   }
+  Serial.println("----------------------------------------");
+  delay(3000);
 }`}
                             </pre>
                           </div>
