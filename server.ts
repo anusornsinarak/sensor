@@ -38,22 +38,6 @@ let activeSettings: DeviceSettings = {
   updatedAt: Date.now(),
 };
 
-// Ensure latest user reading (24.9°C, 60.8%) is synced
-const seedLatestReading = async () => {
-  try {
-    const now = Date.now();
-    await addDoc(collection(db, 'sensor_data'), {
-      timestamp: now,
-      temperature: 24.9,
-      humidity: 60.8,
-    });
-    await setDoc(doc(db, 'device_settings', 'config'), { ...activeSettings, lastSeen: now }, { merge: true });
-    console.log('Successfully recorded latest reading: Temp 24.9°C, Hum 60.8%');
-  } catch (err) {
-    console.error('Error seeding latest reading:', err);
-  }
-};
-seedLatestReading();
 // Sync settings with Firestore on start
 const loadSettings = async () => {
   try {
