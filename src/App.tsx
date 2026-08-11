@@ -278,7 +278,8 @@ export default function App() {
   const serverUrlEndpoint = `${currentOrigin.replace('ais-dev-', 'ais-pre-')}/api/sensor-data`;
 
   // Code version 1: Lightweight Code without ArduinoJson dependency
-  const esp32CodeLight = `#include <SPI.h>
+  const esp32CodeLight = `
+#include <SPI.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <WiFi.h>
@@ -286,14 +287,10 @@ export default function App() {
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <SimpleDHT.h>
-#include <Wire.h> // รองรับเซนเซอร์ SHT30 / DHT30 I2C
-#include <time.h> // เพิ่มเวลา วัน/เดือน/ปี NTP Sync
-#include "soc/soc.h"          // ป้องกัน ESP32 Brownout Reset
-#include "soc/rtc_cntl_reg.h" // ป้องกัน ESP32 Brownout Reset
-
-// --- 0. ตั้งค่า WiFi บ้านล่วงหน้า (เชื่อมต่อ WiFi "Mai_home_2.4G" อัตโนมัติ) ---
-const char* WIFI_SSID = "Mai_home_2.4G";     // ชื่อ WiFi ของคุณ
-const char* WIFI_PASSWORD = "0909142651"; // รหัสผ่าน WiFi ของคุณ
+#include <Wire.h> 
+#include <time.h> 
+#include "soc/soc.h"          
+#include "soc/rtc_cntl_reg.h" 
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
 const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-client-0516953163/databases/ai-studio-iotsensordashboa-6c74a260-d381-44d8-ae58-a587051c2d98/documents/sensor_data?key=AIzaSyCXLGKCPAStDBt0RTcCUdX3ew4c_uB6oxs";
@@ -304,469 +301,308 @@ const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-c
 #define XPT2046_MISO  39
 #define XPT2046_CLK   25
 #define XPT2046_CS    33
-#define TFT_BL        21  // ขาควบคุมไฟหลังจอ Backlight CYD ESP32 (ห้ามใช้ต่อเซนเซอร์)
+#define TFT_BL        21  
 
 SPIClass touchSpi = SPIClass(VSPI);
 XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
 TFT_eSPI tft = TFT_eSPI();
 
-// --- 3. จานสีธีม Dark Dashboard เรืองแสงตามรูปภาพ ---
-#define COLOR_BG         tft.color565(18, 22, 28)    // Dark Charcoal
-#define COLOR_CARD_BG    tft.color565(26, 31, 41)    // Card Slate Dark
-#define COLOR_CARD_LINE  tft.color565(42, 50, 64)    // Border Outline
-#define COLOR_ORANGE     tft.color565(255, 95, 45)   // Temperature Coral Orange
-#define COLOR_CYAN       tft.color565(50, 180, 255)  // Humidity Sky Blue
-#define COLOR_MUTED      tft.color565(140, 150, 165) // Gray Text
-
-// --- 4. ตัวแปรสถานะระบบ ---
+// --- 3. ตัวแปรสถานะระบบ ---
 float temp = 0, humi = 0;
 bool isSensorError = true;
 int lastCloudCode = 0;
-int sendIntervalSec = 15;
-
-// ระบบ Fast Cache จำชนิดเซนเซอร์เพื่อให้อ่านเร็วสุด (<20ms) ไม่กระตุก
-int cachedSensorType = 0; // 0: สแกนใหม่, 1: SHT30(0x44), 2: SHT30(0x45), 3: SHT20, 4: AHT20, 10: AM2301/DHT22, 11: DHT11
-int cachedSensorPin = 27;
-
 unsigned long lastSend = 0;
-String lastSyncOK = "--:--";
-unsigned long lastSensorRead = 0;
-unsigned long lastClockUpdate = 0;
+unsigned long lastTimeUpdate = 0;
+const int sendIntervalSec = 30;
+int currentShtAddress = 0;
 
-// ฟังก์ชันอ่านค่า SHT30 / SHT31 / DHT30 ผ่าน I2C (Address 0x44 หรือ 0x45)
-bool readSHT30I2C(uint8_t addr, float &outTemp, float &outHumi) {
-  Wire.beginTransmission(addr);
-  Wire.write(0x2C);
-  Wire.write(0x06);
-  if (Wire.endTransmission() != 0) {
-    Wire.beginTransmission(addr);
-    Wire.write(0x24);
-    Wire.write(0x00);
-    if (Wire.endTransmission() != 0) return false;
-  }
-  delay(50);
-  if (Wire.requestFrom(addr, (uint8_t)6) == 6) {
-    uint8_t data[6];
-    for (int i = 0; i < 6; i++) data[i] = Wire.read();
-    uint16_t rawTemp = (data[0] << 8) | data[1];
-    uint16_t rawHumi = (data[3] << 8) | data[4];
-    float t = -45.0 + (175.0 * (float)rawTemp / 65535.0);
-    float h = 100.0 * ((float)rawHumi / 65535.0);
-    if (t >= -20.0 && t <= 125.0 && h >= 0.0 && h <= 100.0) {
-      outTemp = t; outHumi = h;
-      return true;
+// --- 4. ฟังก์ชันจัดการเซนเซอร์ (อ่าน DHT11, DHT22, SHT30) ---
+void scanAndReadSensor() {
+  isSensorError = true;
+  float t = 0, h = 0;
+
+  // 4.1 ลองอ่าน SHT30 (I2C)
+  if (currentShtAddress == 0) {
+    Wire.begin(27, 22);
+    Wire.beginTransmission(0x44);
+    if (Wire.endTransmission() == 0) currentShtAddress = 0x44;
+    else {
+      Wire.beginTransmission(0x45);
+      if (Wire.endTransmission() == 0) currentShtAddress = 0x45;
     }
   }
-  return false;
-}
-
-// อ่านค่าเซนเซอร์ SHT20 / HTU21D (Address 0x40) ที่ใช้ในโพรบหัวทรงกระบอกสีขาว
-bool readSHT20I2C(float &outTemp, float &outHumi) {
-  Wire.beginTransmission(0x40);
-  Wire.write(0xF3);
-  if (Wire.endTransmission() == 0) {
-    delay(80);
-    if (Wire.requestFrom((uint8_t)0x40, (uint8_t)3) == 3) {
-      uint8_t msb = Wire.read();
-      uint8_t lsb = Wire.read();
-      Wire.read();
-      uint16_t rawT = ((uint16_t)msb << 8) | lsb;
-      rawT &= ~0x0003;
-      float t = -46.85 + (175.72 * (float)rawT / 65536.0);
-      
-      Wire.beginTransmission(0x40);
-      Wire.write(0xF5);
-      if (Wire.endTransmission() == 0) {
-        delay(30);
-        if (Wire.requestFrom((uint8_t)0x40, (uint8_t)3) == 3) {
-          uint8_t hmsb = Wire.read();
-          uint8_t hlsb = Wire.read();
-          Wire.read();
-          uint16_t rawH = ((uint16_t)hmsb << 8) | hlsb;
-          rawH &= ~0x0003;
-          float h = -6.0 + (125.0 * (float)rawH / 65536.0);
-          if (t >= -20.0 && t <= 125.0 && h >= 0.0 && h <= 100.0) {
-            outTemp = t; outHumi = h;
-            return true;
-          }
+  
+  if (currentShtAddress != 0) {
+    Wire.beginTransmission(currentShtAddress);
+    Wire.write(0x2C); Wire.write(0x06);
+    if (Wire.endTransmission() == 0) {
+      delay(20);
+      Wire.requestFrom(currentShtAddress, 6);
+      if (Wire.available() == 6) {
+        uint8_t data[6];
+        for (int i = 0; i < 6; i++) data[i] = Wire.read();
+        t = ((((data[0] * 256.0) + data[1]) * 175) / 65535.0) - 45;
+        h = ((((data[3] * 256.0) + data[4]) * 100) / 65535.0);
+        if (!isnan(t) && !isnan(h) && t > -40 && t < 120 && h >= 0 && h <= 100) {
+          temp = t; humi = h; isSensorError = false;
+          return; 
         }
       }
     }
   }
-  return false;
-}
 
-// ฟังก์ชันอ่านค่า AHT20 / DHT20 (Address 0x38)
-bool readAHT20I2C(float &outTemp, float &outHumi) {
-  Wire.beginTransmission(0x38);
-  Wire.write(0xAC); Wire.write(0x33); Wire.write(0x00);
-  if (Wire.endTransmission() != 0) return false;
-  delay(80);
-  if (Wire.requestFrom((uint8_t)0x38, (uint8_t)6) == 6) {
-    uint8_t d[6];
-    for (int i = 0; i < 6; i++) d[i] = Wire.read();
-    uint32_t humRaw = ((uint32_t)d[1] << 12) | ((uint32_t)d[2] << 4) | (d[3] >> 4);
-    uint32_t tempRaw = (((uint32_t)d[3] & 0x0F) << 16) | ((uint32_t)d[4] << 8) | d[5];
-    float h = ((float)humRaw * 100.0) / 1048576.0;
-    float t = (((float)tempRaw * 200.0) / 1048576.0) - 50.0;
-    if (t >= -20.0 && t <= 125.0 && h >= 0.0 && h <= 100.0) {
-      outTemp = t; outHumi = h;
-      return true;
-    }
-  }
-  return false;
-}
-
-// ฟังก์ชันอ่านค่า DHT11/22 แบบ direct
-bool readDHTDirect(int pin, bool isDHT22, float &outTemp, float &outHumi) {
-  uint8_t data[5] = {0, 0, 0, 0, 0};
-  
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, LOW);
-  delay(isDHT22 ? 2 : 20);
-  digitalWrite(pin, HIGH);
-  delayMicroseconds(30);
-  pinMode(pin, INPUT_PULLUP);
-  
-  unsigned long timeout = micros();
-  while(digitalRead(pin) == HIGH) { if (micros() - timeout > 100) return false; }
-  timeout = micros();
-  while(digitalRead(pin) == LOW) { if (micros() - timeout > 100) return false; }
-  timeout = micros();
-  while(digitalRead(pin) == HIGH) { if (micros() - timeout > 100) return false; }
-  
-  noInterrupts();
-  for (int i = 0; i < 40; i++) {
-    unsigned long startLow = micros();
-    while(digitalRead(pin) == LOW) {
-      if (micros() - startLow > 100) { interrupts(); return false; }
-    }
-    unsigned long startHigh = micros();
-    while(digitalRead(pin) == HIGH) {
-      if (micros() - startHigh > 100) { interrupts(); return false; }
-    }
-    if ((micros() - startHigh) > 40) {
-      data[i / 8] |= (1 << (7 - (i % 8)));
-    }
-  }
-  interrupts();
-  
-  if (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF)) {
-    if (isDHT22) {
-      outHumi = (float)((data[0] << 8) | data[1]) * 0.1;
-      outTemp = (float)(((data[2] & 0x7F) << 8) | data[3]) * 0.1;
-      if (data[2] & 0x80) outTemp = -outTemp;
-    } else {
-      outHumi = data[0] + (float)data[1] * 0.1;
-      outTemp = data[2] + (float)data[3] * 0.1;
-    }
-    return (outHumi > 0 && outHumi <= 100 && outTemp >= -20 && outTemp <= 125);
-  }
-  return false;
-}
-
-// ฟังก์ชันสแกนอ่านค่าอัตโนมัติ (สแกนทั้ง SHT30/SHT20/AHT20 I2C และ DHT11/22)
-void readSensorAuto() {
-  float t = 0, h = 0;
-
-  // 1. ลองอ่าน I2C (SDA=27, SCL=22) - สแกน SHT30 (0x44, 0x45), SHT20 (0x40), AHT20 (0x38)
-  Wire.end();
-  Wire.begin(27, 22);
-  Wire.setClock(100000);
-  delay(10);
-  if (readSHT30I2C(0x44, t, h) || readSHT30I2C(0x45, t, h) || readSHT20I2C(t, h) || readAHT20I2C(t, h)) {
-    temp = t; humi = h; isSensorError = false;
-    return;
-  }
-
-  // 2. สลับพิน I2C (SDA=22, SCL=27) กรณีสายสลับ
-  Wire.end();
-  Wire.begin(22, 27);
-  Wire.setClock(100000);
-  delay(10);
-  if (readSHT30I2C(0x44, t, h) || readSHT30I2C(0x45, t, h) || readSHT20I2C(t, h) || readAHT20I2C(t, h)) {
-    temp = t; humi = h; isSensorError = false;
-    return;
-  }
-
-  // 3. CRITICAL: ปิด I2C บัสก่อนเริ่มอ่าน 1-Wire Single Bus (DHT22 / AM2301 / DHT11)
-  Wire.end();
-
-  // 4. สำรองสำหรับโพรบเซนเซอร์แบบ 1-Wire Digital (AM2301 / DHT22 / DHT11) บน GPIO 27 และ 22
-  int dhtPins[] = {27, 22, 17, 32}; 
-  for (int p = 0; p < 4; p++) {
-    int pin = dhtPins[p];
+  // 4.2 ลองอ่าน DHT11/DHT22 แบบ Native High-Precision Bit Reader
+  int dhtPins[] = {27, 22, 17};
+  for (int p : dhtPins) {
+    pinMode(p, INPUT_PULLUP); delay(2);
+    pinMode(p, OUTPUT); digitalWrite(p, LOW); delay(20);
+    digitalWrite(p, HIGH); delayMicroseconds(40);
+    pinMode(p, INPUT_PULLUP);
     
-    // ลองอ่านแบบ DHT22 / AM2301 (โพรบส่วนใหญ่เป็น AM2301)
-    if (readDHTDirect(pin, true, t, h)) {
-      temp = t; humi = h; isSensorError = false;
-      return;
+    unsigned long timeout = micros();
+    while (digitalRead(p) == HIGH) { if (micros() - timeout > 100) break; }
+    timeout = micros();
+    while (digitalRead(p) == LOW) { if (micros() - timeout > 100) break; }
+    timeout = micros();
+    while (digitalRead(p) == HIGH) { if (micros() - timeout > 100) break; }
+    
+    uint8_t data[5] = {0, 0, 0, 0, 0};
+    bool pinValid = true;
+    noInterrupts();
+    for (int i = 0; i < 40; i++) {
+      timeout = micros();
+      while (digitalRead(p) == LOW) { if (micros() - timeout > 100) { pinValid = false; break; } }
+      unsigned long ts = micros();
+      while (digitalRead(p) == HIGH) { if (micros() - ts > 100) { pinValid = false; break; } }
+      if ((micros() - ts) > 40) data[i / 8] |= (1 << (7 - (i % 8)));
     }
-    // ลองอ่านแบบ DHT11
-    if (readDHTDirect(pin, false, t, h)) {
-      temp = t; humi = h; isSensorError = false;
-      return;
+    interrupts();
+    
+    if (pinValid && ((data[0] + data[1] + data[2] + data[3]) & 0xFF) == data[4] && data[4] != 0) {
+      if (data[1] == 0 && data[3] == 0) { 
+        t = data[2]; h = data[0]; 
+      } else { 
+        t = ((data[2] & 0x7F) << 8 | data[3]) * 0.1;
+        if (data[2] & 0x80) t *= -1;
+        h = (data[0] << 8 | data[1]) * 0.1;
+      }
+      if (!isnan(t) && !isnan(h) && t > -40 && t < 120 && h >= 0 && h <= 100) {
+        temp = t; humi = h; isSensorError = false;
+        return; 
+      }
     }
-
-    SimpleDHT11 d11(pin);
-    if (d11.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
-      temp = t; humi = h; isSensorError = false;
-      return;
-    }
-  }
-
-  // 5. Strict Hardware Mode: หากอ่านไม่ได้ ให้ติด Sensor Error (ค่า 0.0)
-  isSensorError = true;
-  temp = 0.0;
-  humi = 0.0;
-}
-
-
-// 1. แถบแสดงสถานะบนสุด (Status Bar)
-void drawHeaderStatus() {
-  // วาดข้อความโดยไม่ล้างจอทั้งหมด ป้องกันการกระพริบ
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.drawString("ROOM 01", 8, 5, 2);
-
-  if (WiFi.status() == WL_CONNECTED) {
-    tft.setTextColor(TFT_WHITE, COLOR_BG);
-    tft.drawString("Wi-Fi", 95, 5, 2);
-    tft.fillCircle(132, 12, 3, TFT_GREEN);
-  } else {
-    tft.setTextColor(TFT_RED, COLOR_BG);
-    tft.drawString("Wi-Fi", 95, 5, 2);
-    tft.fillCircle(132, 12, 3, TFT_RED);
-  }
-
-  tft.setTextColor(TFT_GREEN, COLOR_BG);
-  tft.drawString("SD [READY]", 145, 5, 2);
-
-  struct tm timeinfo;
-  char timeStr[10] = "--:--";
-  if (getLocalTime(&timeinfo)) {
-    strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
-  }
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.drawString("100%  " + String(timeStr), 235, 5, 2);
-
-  tft.drawFastHLine(0, 26, 320, COLOR_CARD_LINE);
-}
-
-// 2. ฟังก์ชันวาดค่าตัวเลขเซนเซอร์ขนาดใหญ่
-void drawSensorValues() {
-  // ลบเฉพาะพื้นที่ในกรอบตัวเลขเพื่อไม่ให้จอกระพริบ (No Screen Flicker)
-  tft.fillRect(10, 52, 142, 60, COLOR_CARD_BG);
-  tft.fillRect(168, 52, 142, 60, COLOR_CARD_BG);
-
-  if (!isSensorError) {
-    tft.setTextColor(COLOR_ORANGE, COLOR_CARD_BG);
-    tft.drawString(String(temp, 1), 20, 58, 7);
-    tft.drawString("oC", 125, 60, 2);
-
-    tft.setTextColor(COLOR_CYAN, COLOR_CARD_BG);
-    tft.drawString(String(humi, 1), 178, 58, 7);
-    tft.drawString("%", 282, 60, 2);
-  } else {
-    tft.setTextColor(TFT_RED, COLOR_CARD_BG);
-    tft.drawString("ERR!", 40, 68, 4);
-    tft.drawString("ERR!", 198, 68, 4);
   }
 }
 
-// 3. ฟังก์ชันอัปเดตการ์ดสถานะ Cloud & Alert
-void drawStatusCard() {
-  tft.fillRect(10, 138, 300, 44, COLOR_CARD_BG);
-  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
-  String cloudText = "Cloud: " + String(lastCloudCode == 200 ? "Synced (200 OK)" : (lastCloudCode == 0 ? "Connecting..." : "Error " + String(lastCloudCode)));
-  tft.drawString(cloudText, 14, 142, 2);
-
-  tft.setTextColor(isSensorError ? TFT_RED : TFT_GREEN, COLOR_CARD_BG);
-  tft.drawString(isSensorError ? "STATUS: SENSOR ERR" : "STATUS: NORMAL", 14, 162, 2);
-
-  tft.setTextColor(COLOR_MUTED, COLOR_CARD_BG);
-  tft.drawString("Last OK: " + lastSyncOK + "  ", 180, 162, 2);
-}
-
-// 4. ออกแบบหน้าจอ TFT ใหม่
+// --- 5. การแสดงผลหน้าจอ (UI) ดีไซน์ใหม่ ---
 void drawUI() {
-  tft.fillScreen(COLOR_BG);
-  drawHeaderStatus();
+  tft.fillScreen(TFT_BLACK);
+  
+  // Top Bar: Time container
+  tft.fillRect(0, 0, 320, 50, tft.color565(20, 30, 50));
+  tft.setTextColor(TFT_WHITE, tft.color565(20, 30, 50));
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Loading Time...", 160, 25, 4);
 
-  // --- การ์ดอุณหภูมิ (ซ้าย) กรอบส้ม Coral ---
-  tft.fillRoundRect(6, 30, 150, 100, 10, COLOR_CARD_BG);
-  tft.drawRoundRect(6, 30, 150, 100, 10, COLOR_ORANGE);
-  tft.drawRoundRect(7, 31, 148, 98, 9, tft.color565(180, 60, 30));
-  tft.setTextColor(COLOR_ORANGE, COLOR_CARD_BG);
-  tft.drawString("TEMP", 16, 36, 2);
+  // Middle labels
+  tft.setTextColor(tft.color565(150, 150, 150), TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("TEMPERATURE", 80, 75, 2);
+  tft.drawString("HUMIDITY", 240, 75, 2);
 
-  // --- การ์ดความชื้น (ขวา) กรอบฟ้า Cyan ---
-  tft.fillRoundRect(164, 30, 150, 100, 10, COLOR_CARD_BG);
-  tft.drawRoundRect(164, 30, 150, 100, 10, COLOR_CYAN);
-  tft.drawRoundRect(165, 31, 148, 98, 9, tft.color565(30, 120, 180));
-  tft.setTextColor(COLOR_CYAN, COLOR_CARD_BG);
-  tft.drawString("HUMIDITY", 174, 36, 2);
-
-  drawSensorValues();
-
-  // --- การ์ดตรงกลาง: Cloud Sync & Alert Status ---
-  tft.fillRoundRect(6, 136, 308, 48, 10, COLOR_CARD_BG);
-  tft.drawRoundRect(6, 136, 308, 48, 10, COLOR_CARD_LINE);
-
-  drawStatusCard();
-
-  // --- ปุ่มกดทัชสกรีนด้านล่าง 3 ปุ่ม ---
-  tft.fillRoundRect(6, 190, 98, 42, 8, COLOR_CARD_BG);
-  tft.drawRoundRect(6, 190, 98, 42, 8, COLOR_CARD_LINE);
-  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
-  tft.drawCentreString("[ SYNC ]", 55, 202, 2);
-
-  tft.fillRoundRect(111, 190, 98, 42, 8, COLOR_CARD_BG);
-  tft.drawRoundRect(111, 190, 98, 42, 8, COLOR_CARD_LINE);
-  tft.setTextColor(TFT_YELLOW, COLOR_CARD_BG);
-  tft.drawCentreString("[ CONFIG ]", 160, 202, 2);
-
+  // Line separator
+  tft.drawFastVLine(160, 60, 130, tft.color565(40, 40, 40));
+  
+  // Bottom Bar (Status & Button)
+  tft.fillRect(0, 205, 320, 35, tft.color565(15, 15, 15));
+  
+  // Reset WiFi Button
+  tft.fillRoundRect(230, 208, 85, 28, 4, tft.color565(255, 180, 0));
+  tft.setTextColor(TFT_BLACK, tft.color565(255, 180, 0));
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("WIFI CFG", 272, 222, 2);
 }
 
+void drawTime() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 50)) {
+    char timeStr[30];
+    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+    
+    // Clear top bar area for text
+    tft.fillRect(0, 0, 320, 50, tft.color565(20, 30, 50)); 
+    
+    // Check if we also want date
+    char dateStr[30];
+    strftime(dateStr, sizeof(dateStr), "%d %b %Y", &timeinfo);
+    
+    tft.setTextColor(TFT_WHITE, tft.color565(20, 30, 50));
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(timeStr, 160, 18, 4); // Big Time
+    tft.setTextColor(tft.color565(200, 200, 200), tft.color565(20, 30, 50));
+    tft.drawString(dateStr, 160, 38, 2); // Small Date
+  }
+}
+
+void drawStatusCard() {
+  // --- Temperature ---
+  tft.fillRect(0, 90, 155, 90, TFT_BLACK); 
+  tft.setTextDatum(MC_DATUM);
+  if (isSensorError) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("ERR", 80, 130, 6);
+  } else {
+    tft.setTextColor(tft.color565(255, 95, 45), TFT_BLACK);
+    tft.drawString(String(temp, 1), 70, 130, 6); 
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("C", 135, 120, 4);
+  }
+
+  // --- Humidity ---
+  tft.fillRect(165, 90, 155, 90, TFT_BLACK);
+  if (isSensorError) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("ERR", 240, 130, 6);
+  } else {
+    tft.setTextColor(tft.color565(50, 180, 255), TFT_BLACK);
+    tft.drawString(String(humi, 1), 230, 130, 6);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("%", 295, 120, 4);
+  }
+  
+  // --- Bottom Status Bar (Left side) ---
+  tft.fillRect(0, 205, 225, 35, tft.color565(15, 15, 15));
+  tft.setTextColor(TFT_LIGHTGREY, tft.color565(15, 15, 15));
+  tft.setTextDatum(ML_DATUM);
+  
+  String ipStr = "IP: " + WiFi.localIP().toString();
+  String codeStr = "HTTP: " + String(lastCloudCode);
+  tft.drawString(ipStr, 5, 215, 1);
+  tft.drawString(codeStr, 5, 228, 1);
+}
+
+void checkTouch() {
+  if (touch.touched()) {
+    TS_Point p = touch.getPoint();
+    // Rotation Mapping for Touch (Landscape)
+    int touchX = map(p.x, 300, 3800, 0, 320);
+    int touchY = map(p.y, 300, 3800, 0, 240);
+    
+    // Check if touched the WIFI CFG button (230, 208, 85, 28)
+    if (touchX > 220 && touchX < 320 && touchY > 195 && touchY < 240) {
+      tft.fillScreen(TFT_BLACK);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString("Resetting WiFi...", 160, 100, 4);
+      tft.drawString("Please wait.", 160, 130, 2);
+      delay(1000);
+      WiFiManager wm;
+      wm.resetSettings();
+      ESP.restart();
+    }
+  }
+}
+
+// --- 6. ฟังก์ชัน Setup & Loop ---
 void setup() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ป้องกัน Brownout Reset จากไฟ USB ตกขณะเปิด WiFi
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ปิด Brownout
   Serial.begin(115200);
 
-  // 1. เปิดไฟ Backlight หน้าจอ CYD ESP32 (GPIO 21) ล็อคค้างไว้ ห้ามสั่งเปลี่ยนพิน
-  pinMode(21, OUTPUT);
-  digitalWrite(21, HIGH);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
 
-  tft.init(); 
-  tft.setRotation(1);
-
-  // 2. เริ่มต้นระบบทัชสกรีน XPT2046
   touchSpi.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
-  touch.begin(touchSpi); 
+  touch.begin();
   touch.setRotation(1);
 
-  // 3. อ่านค่าเซนเซอร์ครั้งแรก
-  readSensorAuto();
-  drawUI();
-
-  configTime(25200, 0, "asia.pool.ntp.org", "pool.ntp.org", "time.nist.gov");
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  tft.init();
+  tft.setRotation(1);
   
-  if (strlen(WIFI_SSID) > 0) {
-    Serial.print("Connecting to WiFi: ");
-    Serial.println(WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    int retry = 0;
-    while (WiFi.status() != WL_CONNECTED && retry < 30) {
-      delay(500);
-      Serial.print(".");
-      retry++;
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\\nWiFi Connected!");
-      Serial.print("IP: "); Serial.println(WiFi.localIP());
-    } else {
-      Serial.println("\\nWiFi Connect Failed.");
-    }
-  } else {
-    WiFiManager wm;
-    wm.setConfigPortalTimeout(120);
-    wm.setBreakAfterConfig(true);
-    wm.autoConnect("CYD_ESP32_LIGHT");
+  // Initial Loading Screen
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Connecting WiFi...", 160, 100, 4);
+  tft.drawString("Use phone to connect CYD_ESP32_LIGHT", 160, 140, 2);
+
+  // Default WiFi Fallback
+  WiFi.mode(WIFI_STA);
+  WiFi.begin("Mai_home_2.4G", "0909142651");
+  int retry = 0;
+  while(WiFi.status() != WL_CONNECTED && retry < 15) {
+     delay(500);
+     Serial.print(".");
+     retry++;
   }
+
+  // Setup WiFi Manager if hardcoded one fails
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(180); 
+    if (!wm.startConfigPortal("CYD_ESP32_LIGHT")) {
+      Serial.println("Failed to connect or hit timeout");
+      delay(3000);
+      ESP.restart();
+    }
+  }
+
+  Serial.println("\\nWiFi Connected!");
+  Serial.print("IP: "); Serial.println(WiFi.localIP());
+
+  // Setup Time
+  configTime(25200, 0, "asia.pool.ntp.org", "pool.ntp.org", "time.nist.gov");
 
   drawUI();
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    static unsigned long lastWiFiRetry = 0;
-    if (millis() - lastWiFiRetry > 10000) {
-      lastWiFiRetry = millis();
-      if (strlen(WIFI_SSID) > 0) {
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      } else {
-        WiFi.reconnect();
-      }
-    }
+  checkTouch();
+
+  // Update Time every second
+  if (millis() - lastTimeUpdate > 1000) {
+    drawTime();
+    lastTimeUpdate = millis();
   }
 
-  if (millis() - lastClockUpdate > 1000) {
-    lastClockUpdate = millis();
-    drawHeaderStatus();
-  }
-
-  // 1. อ่านเซนเซอร์ทุก 2.5 วินาที
-  if (millis() - lastSensorRead > 2500) {
-    lastSensorRead = millis();
-    readSensorAuto();
-    drawSensorValues();
-    drawStatusCard();
-  }
-
-  // 2. ทัชสกรีนปุ่มกด 3 ปุ่มด้านล่าง
-  if (touch.touched()) {
-    TS_Point p = touch.getPoint();
-    int screenX = map(p.x, 200, 3800, 0, 320);
-    int screenY = map(p.y, 240, 3800, 0, 240);
+  // Update Sensor Data & Cloud
+  if (millis() - lastSend > (sendIntervalSec * 1000) || lastSend == 0) {
+    scanAndReadSensor();
     
-    if (screenY > 185) {
-      if (screenX < 105) {
-        lastSend = 0;
-        drawStatusCard();
-        delay(200);
-      } else if (screenX >= 105) {
-        WiFiManager wm; wm.resetSettings(); ESP.restart();
-      }
-    }
-  }
-
-  // 3. ส่งข้อมูลขึ้น Cloud
-  if ((millis() - lastSend > (sendIntervalSec * 1000)) && WiFi.status() == WL_CONNECTED) {
-    WiFiClientSecure client; client.setInsecure();
-    HTTPClient http;
-    http.setTimeout(8000);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    if (http.begin(client, serverUrl)) {
-      http.addHeader("Content-Type", "application/json");
-      http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
-
-      time_t now; time(&now);
-      String json = "{";
-      json += "\\"fields\\": {";
-      json += "\\"temperature\\": {\\"doubleValue\\": " + String(temp, 1) + "},";
-      json += "\\"humidity\\": {\\"doubleValue\\": " + String(humi, 1) + "},";
-      json += "\\"sensor_error\\": {\\"booleanValue\\": " + String(isSensorError ? "true" : "false") + "},";
-      json += "\\"timestamp\\": {\\"integerValue\\": \\"" + String((unsigned long)now) + "000\\"}";
-      json += "}}";
-
-      Serial.println("Sending Data to Cloud...");
-      Serial.println(json);
-      lastCloudCode = http.POST(json);
-      Serial.print("HTTP Response Code: ");
-      Serial.println(lastCloudCode);
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFiClientSecure client; client.setInsecure();
+      HTTPClient http;
+      http.setTimeout(8000);
+      http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
       
-      if (lastCloudCode == 200) {
-        struct tm timeinfo;
-        if (getLocalTime(&timeinfo)) {
-          char timeStr[10];
-          strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
-          lastSyncOK = String(timeStr);
-        }
-        String res = http.getString();
-      } else {
-        Serial.print("Error Payload: ");
-        Serial.println(http.getString());
+      if (http.begin(client, serverUrl)) {
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
+        
+        time_t now; time(&now);
+        String json = "{";
+        json += "\\"fields\\": {";
+        json += "\\"temperature\\": {\\"doubleValue\\": " + String(temp, 1) + "},";
+        json += "\\"humidity\\": {\\"doubleValue\\": " + String(humi, 1) + "},";
+        json += "\\"sensor_error\\": {\\"booleanValue\\": " + String(isSensorError ? "true" : "false") + "},";
+        json += "\\"timestamp\\": {\\"integerValue\\": \\"" + String((unsigned long)now) + "000\\"}";
+        json += "}}";
+
+        Serial.println("Sending Data...");
+        lastCloudCode = http.POST(json);
+        Serial.print("HTTP: "); Serial.println(lastCloudCode);
+        http.end();
       }
-      drawStatusCard();
-      http.end();
     }
+    
+    drawStatusCard();
     lastSend = millis();
   }
-}`;
+}
+`;
 
   // Code version 2: Full 2-Way Sync Code with ArduinoJson v7 Library
-  const esp32CodeJson = `#include <SPI.h>
+  const esp32CodeJson = `
+#include <SPI.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <WiFi.h>
@@ -774,15 +610,10 @@ void loop() {
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <SimpleDHT.h>
-#include <Wire.h>        // รองรับเซนเซอร์ SHT30 / DHT30 I2C
-#include <ArduinoJson.h> // รองรับ ArduinoJson v7.x (Benoit Blanchon)
-#include <time.h>        // เพิ่มเวลา วัน/เดือน/ปี NTP Sync
-#include "soc/soc.h"          // ป้องกัน ESP32 Brownout Reset
-#include "soc/rtc_cntl_reg.h" // ป้องกัน ESP32 Brownout Reset
-
-// --- 0. ตั้งค่า WiFi บ้านล่วงหน้า (เชื่อมต่อ WiFi "Mai_home_2.4G" อัตโนมัติ) ---
-const char* WIFI_SSID = "Mai_home_2.4G";     // ชื่อ WiFi ของคุณ
-const char* WIFI_PASSWORD = "0909142651"; // รหัสผ่าน WiFi ของคุณ
+#include <Wire.h> 
+#include <time.h> 
+#include "soc/soc.h"          
+#include "soc/rtc_cntl_reg.h" 
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
 const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-client-0516953163/databases/ai-studio-iotsensordashboa-6c74a260-d381-44d8-ae58-a587051c2d98/documents/sensor_data?key=AIzaSyCXLGKCPAStDBt0RTcCUdX3ew4c_uB6oxs";
@@ -793,452 +624,304 @@ const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-c
 #define XPT2046_MISO  39
 #define XPT2046_CLK   25
 #define XPT2046_CS    33
-#define TFT_BL        21  // ขาควบคุมไฟหลังจอ Backlight CYD ESP32 (ห้ามใช้ต่อเซนเซอร์)
+#define TFT_BL        21  
 
 SPIClass touchSpi = SPIClass(VSPI);
 XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
 TFT_eSPI tft = TFT_eSPI();
 
-// --- 3. จานสีธีม Dark Dashboard เรืองแสงตามรูปภาพ ---
-#define COLOR_BG         tft.color565(18, 22, 28)    // Dark Charcoal
-#define COLOR_CARD_BG    tft.color565(26, 31, 41)    // Card Slate Dark
-#define COLOR_CARD_LINE  tft.color565(42, 50, 64)    // Border Outline
-#define COLOR_ORANGE     tft.color565(255, 95, 45)   // Temperature Coral Orange
-#define COLOR_CYAN       tft.color565(50, 180, 255)  // Humidity Sky Blue
-#define COLOR_MUTED      tft.color565(140, 150, 165) // Gray Text
-
-// --- 4. ตัวแปรสถานะระบบ ---
+// --- 3. ตัวแปรสถานะระบบ ---
 float temp = 0, humi = 0;
 bool isSensorError = true;
 int lastCloudCode = 0;
-int sendIntervalSec = 15;
-float maxTemp = 30.0;
-float maxHum = 65.0;
-
-// ระบบ Fast Cache จำชนิดเซนเซอร์เพื่อให้อ่านเร็วสุด (<20ms) ไม่กระตุก
-int cachedSensorType = 0; // 0: สแกนใหม่, 1: SHT30(0x44), 2: SHT30(0x45), 3: SHT20, 4: AHT20, 10: AM2301/DHT22, 11: DHT11
-int cachedSensorPin = 27;
-
 unsigned long lastSend = 0;
-String lastSyncOK = "--:--";
-unsigned long lastSensorRead = 0;
-unsigned long lastClockUpdate = 0;
+unsigned long lastTimeUpdate = 0;
+const int sendIntervalSec = 30;
+int currentShtAddress = 0;
 
-// [JSON-Code] ฟังก์ชันอ่านค่า SHT30 / SHT31 / DHT30 ผ่าน I2C (Address 0x44 หรือ 0x45)
-bool readSHT30I2C(uint8_t addr, float &outTemp, float &outHumi) {
-  Wire.beginTransmission(addr);
-  Wire.write(0x2C);
-  Wire.write(0x06);
-  if (Wire.endTransmission() != 0) {
-    Wire.beginTransmission(addr);
-    Wire.write(0x24);
-    Wire.write(0x00);
-    if (Wire.endTransmission() != 0) return false;
-  }
-  delay(50);
-  if (Wire.requestFrom(addr, (uint8_t)6) == 6) {
-    uint8_t data[6];
-    for (int i = 0; i < 6; i++) data[i] = Wire.read();
-    uint16_t rawTemp = (data[0] << 8) | data[1];
-    uint16_t rawHumi = (data[3] << 8) | data[4];
-    float t = -45.0 + (175.0 * (float)rawTemp / 65535.0);
-    float h = 100.0 * ((float)rawHumi / 65535.0);
-    if (t >= -20.0 && t <= 125.0 && h >= 0.0 && h <= 100.0) {
-      outTemp = t; outHumi = h;
-      return true;
+// --- 4. ฟังก์ชันจัดการเซนเซอร์ (อ่าน DHT11, DHT22, SHT30) ---
+void scanAndReadSensor() {
+  isSensorError = true;
+  float t = 0, h = 0;
+
+  // 4.1 ลองอ่าน SHT30 (I2C)
+  if (currentShtAddress == 0) {
+    Wire.begin(27, 22);
+    Wire.beginTransmission(0x44);
+    if (Wire.endTransmission() == 0) currentShtAddress = 0x44;
+    else {
+      Wire.beginTransmission(0x45);
+      if (Wire.endTransmission() == 0) currentShtAddress = 0x45;
     }
   }
-  return false;
-}
-
-// อ่านค่าเซนเซอร์ SHT20 / HTU21D (Address 0x40) ที่ใช้ในโพรบหัวทรงกระบอกสีขาว
-bool readSHT20I2C(float &outTemp, float &outHumi) {
-  Wire.beginTransmission(0x40);
-  Wire.write(0xF3);
-  if (Wire.endTransmission() == 0) {
-    delay(80);
-    if (Wire.requestFrom((uint8_t)0x40, (uint8_t)3) == 3) {
-      uint8_t msb = Wire.read();
-      uint8_t lsb = Wire.read();
-      Wire.read();
-      uint16_t rawT = ((uint16_t)msb << 8) | lsb;
-      rawT &= ~0x0003;
-      float t = -46.85 + (175.72 * (float)rawT / 65536.0);
-      
-      Wire.beginTransmission(0x40);
-      Wire.write(0xF5);
-      if (Wire.endTransmission() == 0) {
-        delay(30);
-        if (Wire.requestFrom((uint8_t)0x40, (uint8_t)3) == 3) {
-          uint8_t hmsb = Wire.read();
-          uint8_t hlsb = Wire.read();
-          Wire.read();
-          uint16_t rawH = ((uint16_t)hmsb << 8) | hlsb;
-          rawH &= ~0x0003;
-          float h = -6.0 + (125.0 * (float)rawH / 65536.0);
-          if (t >= -20.0 && t <= 125.0 && h >= 0.0 && h <= 100.0) {
-            outTemp = t; outHumi = h;
-            return true;
-          }
+  
+  if (currentShtAddress != 0) {
+    Wire.beginTransmission(currentShtAddress);
+    Wire.write(0x2C); Wire.write(0x06);
+    if (Wire.endTransmission() == 0) {
+      delay(20);
+      Wire.requestFrom(currentShtAddress, 6);
+      if (Wire.available() == 6) {
+        uint8_t data[6];
+        for (int i = 0; i < 6; i++) data[i] = Wire.read();
+        t = ((((data[0] * 256.0) + data[1]) * 175) / 65535.0) - 45;
+        h = ((((data[3] * 256.0) + data[4]) * 100) / 65535.0);
+        if (!isnan(t) && !isnan(h) && t > -40 && t < 120 && h >= 0 && h <= 100) {
+          temp = t; humi = h; isSensorError = false;
+          return; 
         }
       }
     }
   }
-  return false;
-}
 
-// ฟังก์ชันอ่านค่า AHT20 / DHT20 (Address 0x38)
-bool readAHT20I2C(float &outTemp, float &outHumi) {
-  Wire.beginTransmission(0x38);
-  Wire.write(0xAC); Wire.write(0x33); Wire.write(0x00);
-  if (Wire.endTransmission() != 0) return false;
-  delay(80);
-  if (Wire.requestFrom((uint8_t)0x38, (uint8_t)6) == 6) {
-    uint8_t d[6];
-    for (int i = 0; i < 6; i++) d[i] = Wire.read();
-    uint32_t humRaw = ((uint32_t)d[1] << 12) | ((uint32_t)d[2] << 4) | (d[3] >> 4);
-    uint32_t tempRaw = (((uint32_t)d[3] & 0x0F) << 16) | ((uint32_t)d[4] << 8) | d[5];
-    float h = ((float)humRaw * 100.0) / 1048576.0;
-    float t = (((float)tempRaw * 200.0) / 1048576.0) - 50.0;
-    if (t >= -20.0 && t <= 125.0 && h >= 0.0 && h <= 100.0) {
-      outTemp = t; outHumi = h;
-      return true;
-    }
-  }
-  return false;
-}
-
-// ฟังก์ชันอ่านค่า DHT แบบความแม่นยำสูง (ปิด interrupts ป้องกันสัญญาณ WiFi รบกวนไทม์มิ่ง)
-bool readDHTDirect(int pin, bool isDHT22, float &outTemp, float &outHumi) {
-  uint8_t data[5] = {0, 0, 0, 0, 0};
-  
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, LOW);
-  delay(isDHT22 ? 2 : 20); // 18-20ms start pulse
-  digitalWrite(pin, HIGH);
-  delayMicroseconds(30);
-  pinMode(pin, INPUT_PULLUP);
-  
-  unsigned long timeout = micros();
-  while(digitalRead(pin) == HIGH) { if (micros() - timeout > 100) return false; }
-  timeout = micros();
-  while(digitalRead(pin) == LOW) { if (micros() - timeout > 100) return false; }
-  timeout = micros();
-  while(digitalRead(pin) == HIGH) { if (micros() - timeout > 100) return false; }
-  
-  noInterrupts();
-  for (int i = 0; i < 40; i++) {
-    unsigned long startLow = micros();
-    while(digitalRead(pin) == LOW) {
-      if (micros() - startLow > 100) { interrupts(); return false; }
-    }
-    unsigned long startHigh = micros();
-    while(digitalRead(pin) == HIGH) {
-      if (micros() - startHigh > 100) { interrupts(); return false; }
-    }
-    if ((micros() - startHigh) > 40) {
-      data[i / 8] |= (1 << (7 - (i % 8)));
-    }
-  }
-  interrupts();
-  
-  if (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF)) {
-    if (isDHT22) {
-      outHumi = (float)((data[0] << 8) | data[1]) * 0.1;
-      outTemp = (float)(((data[2] & 0x7F) << 8) | data[3]) * 0.1;
-      if (data[2] & 0x80) outTemp = -outTemp;
-    } else {
-      outHumi = data[0] + (float)data[1] * 0.1;
-      outTemp = data[2] + (float)data[3] * 0.1;
-    }
-    return (outHumi > 0 && outHumi <= 100 && outTemp >= -20 && outTemp <= 125);
-  }
-  return false;
-}
-
-// ฟังก์ชันสแกนอ่านค่าอัตโนมัติ (สแกนทั้ง SHT30/SHT20/AHT20 I2C และ DHT11/22)
-void readSensorAuto() {
-  float t = 0, h = 0;
-
-  // 1. ลองอ่าน I2C (SDA=27, SCL=22) - สแกน SHT30 (0x44, 0x45), SHT20 (0x40), AHT20 (0x38)
-  Wire.end();
-  Wire.begin(27, 22);
-  Wire.setClock(100000);
-  delay(10);
-  if (readSHT30I2C(0x44, t, h) || readSHT30I2C(0x45, t, h) || readSHT20I2C(t, h) || readAHT20I2C(t, h)) {
-    temp = t; humi = h; isSensorError = false;
-    return;
-  }
-
-  // 2. สลับพิน I2C (SDA=22, SCL=27) กรณีสายสลับ
-  Wire.end();
-  Wire.begin(22, 27);
-  Wire.setClock(100000);
-  delay(10);
-  if (readSHT30I2C(0x44, t, h) || readSHT30I2C(0x45, t, h) || readSHT20I2C(t, h) || readAHT20I2C(t, h)) {
-    temp = t; humi = h; isSensorError = false;
-    return;
-  }
-
-  // 3. CRITICAL: ปิด I2C บัสก่อนเริ่มอ่าน 1-Wire Single Bus (DHT22 / AM2301 / DHT11)
-  Wire.end();
-
-  // 4. สำรองสำหรับโพรบเซนเซอร์แบบ 1-Wire Digital (AM2301 / DHT22 / DHT11) บน GPIO 27 และ 22
-  int dhtPins[] = {27, 22, 17, 32}; 
-  for (int p = 0; p < 4; p++) {
-    int pin = dhtPins[p];
+  // 4.2 ลองอ่าน DHT11/DHT22 แบบ Native High-Precision Bit Reader
+  int dhtPins[] = {27, 22, 17};
+  for (int p : dhtPins) {
+    pinMode(p, INPUT_PULLUP); delay(2);
+    pinMode(p, OUTPUT); digitalWrite(p, LOW); delay(20);
+    digitalWrite(p, HIGH); delayMicroseconds(40);
+    pinMode(p, INPUT_PULLUP);
     
-    // ลองอ่านแบบ DHT22 / AM2301 (โพรบส่วนใหญ่เป็น AM2301)
-    if (readDHTDirect(pin, true, t, h)) {
-      temp = t; humi = h; isSensorError = false;
-      return;
+    unsigned long timeout = micros();
+    while (digitalRead(p) == HIGH) { if (micros() - timeout > 100) break; }
+    timeout = micros();
+    while (digitalRead(p) == LOW) { if (micros() - timeout > 100) break; }
+    timeout = micros();
+    while (digitalRead(p) == HIGH) { if (micros() - timeout > 100) break; }
+    
+    uint8_t data[5] = {0, 0, 0, 0, 0};
+    bool pinValid = true;
+    noInterrupts();
+    for (int i = 0; i < 40; i++) {
+      timeout = micros();
+      while (digitalRead(p) == LOW) { if (micros() - timeout > 100) { pinValid = false; break; } }
+      unsigned long ts = micros();
+      while (digitalRead(p) == HIGH) { if (micros() - ts > 100) { pinValid = false; break; } }
+      if ((micros() - ts) > 40) data[i / 8] |= (1 << (7 - (i % 8)));
     }
-    // ลองอ่านแบบ DHT11
-    if (readDHTDirect(pin, false, t, h)) {
-      temp = t; humi = h; isSensorError = false;
-      return;
+    interrupts();
+    
+    if (pinValid && ((data[0] + data[1] + data[2] + data[3]) & 0xFF) == data[4] && data[4] != 0) {
+      if (data[1] == 0 && data[3] == 0) { 
+        t = data[2]; h = data[0]; 
+      } else { 
+        t = ((data[2] & 0x7F) << 8 | data[3]) * 0.1;
+        if (data[2] & 0x80) t *= -1;
+        h = (data[0] << 8 | data[1]) * 0.1;
+      }
+      if (!isnan(t) && !isnan(h) && t > -40 && t < 120 && h >= 0 && h <= 100) {
+        temp = t; humi = h; isSensorError = false;
+        return; 
+      }
     }
-
-    SimpleDHT11 d11(pin);
-    if (d11.read2(&t, &h, NULL) == SimpleDHTErrSuccess && !isnan(t) && !isnan(h) && (t != 0 || h != 0)) {
-      temp = t; humi = h; isSensorError = false;
-      return;
-    }
-  }
-
-  // 5. Strict Hardware Mode: หากอ่านไม่ได้ ให้ติด Sensor Error (ค่า 0.0)
-  isSensorError = true;
-  temp = 0.0;
-  humi = 0.0;
-}
-
-
-// 1. แถบแสดงสถานะบนสุด (Status Bar)
-void drawHeaderStatus() {
-  // วาดข้อความโดยไม่ล้างจอทั้งหมด ป้องกันการกระพริบ
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.drawString("ROOM 01", 8, 5, 2);
-
-  if (WiFi.status() == WL_CONNECTED) {
-    tft.setTextColor(TFT_WHITE, COLOR_BG);
-    tft.drawString("Wi-Fi", 95, 5, 2);
-    tft.fillCircle(132, 12, 3, TFT_GREEN);
-  } else {
-    tft.setTextColor(TFT_RED, COLOR_BG);
-    tft.drawString("Wi-Fi", 95, 5, 2);
-    tft.fillCircle(132, 12, 3, TFT_RED);
-  }
-
-  tft.setTextColor(TFT_GREEN, COLOR_BG);
-  tft.drawString("SD [READY]", 145, 5, 2);
-
-  struct tm timeinfo;
-  char timeStr[10] = "--:--";
-  if (getLocalTime(&timeinfo)) strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
-  
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.drawString("100%  " + String(timeStr), 235, 5, 2);
-
-  tft.drawFastHLine(0, 26, 320, COLOR_CARD_LINE);
-}
-
-// 2. ฟังก์ชันวาดค่าตัวเลขเซนเซอร์ขนาดใหญ่
-void drawSensorValues() {
-  // ลบเฉพาะพื้นที่ในกรอบตัวเลขเพื่อไม่ให้จอกระพริบ (No Screen Flicker)
-  tft.fillRect(10, 52, 142, 60, COLOR_CARD_BG);
-  tft.fillRect(168, 52, 142, 60, COLOR_CARD_BG);
-
-  if (!isSensorError) {
-    tft.setTextColor(COLOR_ORANGE, COLOR_CARD_BG);
-    tft.drawString(String(temp, 1), 20, 58, 7);
-    tft.drawString("oC", 125, 60, 2);
-
-    tft.setTextColor(COLOR_CYAN, COLOR_CARD_BG);
-    tft.drawString(String(humi, 1), 178, 58, 7);
-    tft.drawString("%", 282, 60, 2);
-  } else {
-    tft.setTextColor(TFT_RED, COLOR_CARD_BG);
-    tft.drawString("ERR!", 40, 68, 4);
-    tft.drawString("ERR!", 198, 68, 4);
   }
 }
 
-// 3. ฟังก์ชันอัปเดตการ์ดสถานะ Cloud & Alert
-void drawStatusCard() {
-  tft.fillRect(10, 138, 300, 44, COLOR_CARD_BG);
-  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
-  String cloudText = "Cloud: " + String(lastCloudCode == 200 ? "Synced (200 OK)" : (lastCloudCode == 0 ? "Connecting..." : "Error " + String(lastCloudCode)));
-  tft.drawString(cloudText, 14, 142, 2);
-
-  tft.setTextColor(isSensorError ? TFT_RED : TFT_GREEN, COLOR_CARD_BG);
-  tft.drawString(isSensorError ? "STATUS: SENSOR ERR" : "STATUS: NORMAL", 14, 162, 2);
-
-  tft.setTextColor(COLOR_MUTED, COLOR_CARD_BG);
-  tft.drawString("Last OK: " + lastSyncOK + "  ", 180, 162, 2);
-}
-
-// 4. ออกแบบหน้าจอ TFT ใหม่
+// --- 5. การแสดงผลหน้าจอ (UI) ดีไซน์ใหม่ ---
 void drawUI() {
-  tft.fillScreen(COLOR_BG);
-  drawHeaderStatus();
+  tft.fillScreen(TFT_BLACK);
+  
+  // Top Bar: Time container
+  tft.fillRect(0, 0, 320, 50, tft.color565(20, 30, 50));
+  tft.setTextColor(TFT_WHITE, tft.color565(20, 30, 50));
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Loading Time...", 160, 25, 4);
 
-  // --- การ์ดอุณหภูมิ (ซ้าย) กรอบส้ม Coral ---
-  tft.fillRoundRect(6, 30, 150, 100, 10, COLOR_CARD_BG);
-  tft.drawRoundRect(6, 30, 150, 100, 10, COLOR_ORANGE);
-  tft.drawRoundRect(7, 31, 148, 98, 9, tft.color565(180, 60, 30));
-  tft.setTextColor(COLOR_ORANGE, COLOR_CARD_BG);
-  tft.drawString("TEMP", 16, 36, 2);
+  // Middle labels
+  tft.setTextColor(tft.color565(150, 150, 150), TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("TEMPERATURE", 80, 75, 2);
+  tft.drawString("HUMIDITY", 240, 75, 2);
 
-  // --- การ์ดความชื้น (ขวา) กรอบฟ้า Cyan ---
-  tft.fillRoundRect(164, 30, 150, 100, 10, COLOR_CARD_BG);
-  tft.drawRoundRect(164, 30, 150, 100, 10, COLOR_CYAN);
-  tft.drawRoundRect(165, 31, 148, 98, 9, tft.color565(30, 120, 180));
-  tft.setTextColor(COLOR_CYAN, COLOR_CARD_BG);
-  tft.drawString("HUMIDITY", 174, 36, 2);
-
-  drawSensorValues();
-
-  // --- การ์ดตรงกลาง: Cloud Sync & Alert Status ---
-  tft.fillRoundRect(6, 136, 308, 48, 10, COLOR_CARD_BG);
-  tft.drawRoundRect(6, 136, 308, 48, 10, COLOR_CARD_LINE);
-
-  drawStatusCard();
-
-  // --- ปุ่มกดทัชสกรีนด้านล่าง 3 ปุ่ม ---
-  tft.fillRoundRect(6, 190, 98, 42, 8, COLOR_CARD_BG);
-  tft.drawRoundRect(6, 190, 98, 42, 8, COLOR_CARD_LINE);
-  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
-  tft.drawCentreString("[ SYNC ]", 55, 202, 2);
-
-  tft.fillRoundRect(111, 190, 98, 42, 8, COLOR_CARD_BG);
-  tft.drawRoundRect(111, 190, 98, 42, 8, COLOR_CARD_LINE);
-  tft.setTextColor(TFT_YELLOW, COLOR_CARD_BG);
-  tft.drawCentreString("[ CONFIG ]", 160, 202, 2);
-
+  // Line separator
+  tft.drawFastVLine(160, 60, 130, tft.color565(40, 40, 40));
+  
+  // Bottom Bar (Status & Button)
+  tft.fillRect(0, 205, 320, 35, tft.color565(15, 15, 15));
+  
+  // Reset WiFi Button
+  tft.fillRoundRect(230, 208, 85, 28, 4, tft.color565(255, 180, 0));
+  tft.setTextColor(TFT_BLACK, tft.color565(255, 180, 0));
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("WIFI CFG", 272, 222, 2);
 }
 
+void drawTime() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 50)) {
+    char timeStr[30];
+    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+    
+    // Clear top bar area for text
+    tft.fillRect(0, 0, 320, 50, tft.color565(20, 30, 50)); 
+    
+    // Check if we also want date
+    char dateStr[30];
+    strftime(dateStr, sizeof(dateStr), "%d %b %Y", &timeinfo);
+    
+    tft.setTextColor(TFT_WHITE, tft.color565(20, 30, 50));
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(timeStr, 160, 18, 4); // Big Time
+    tft.setTextColor(tft.color565(200, 200, 200), tft.color565(20, 30, 50));
+    tft.drawString(dateStr, 160, 38, 2); // Small Date
+  }
+}
+
+void drawStatusCard() {
+  // --- Temperature ---
+  tft.fillRect(0, 90, 155, 90, TFT_BLACK); 
+  tft.setTextDatum(MC_DATUM);
+  if (isSensorError) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("ERR", 80, 130, 6);
+  } else {
+    tft.setTextColor(tft.color565(255, 95, 45), TFT_BLACK);
+    tft.drawString(String(temp, 1), 70, 130, 6); 
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("C", 135, 120, 4);
+  }
+
+  // --- Humidity ---
+  tft.fillRect(165, 90, 155, 90, TFT_BLACK);
+  if (isSensorError) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("ERR", 240, 130, 6);
+  } else {
+    tft.setTextColor(tft.color565(50, 180, 255), TFT_BLACK);
+    tft.drawString(String(humi, 1), 230, 130, 6);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("%", 295, 120, 4);
+  }
+  
+  // --- Bottom Status Bar (Left side) ---
+  tft.fillRect(0, 205, 225, 35, tft.color565(15, 15, 15));
+  tft.setTextColor(TFT_LIGHTGREY, tft.color565(15, 15, 15));
+  tft.setTextDatum(ML_DATUM);
+  
+  String ipStr = "IP: " + WiFi.localIP().toString();
+  String codeStr = "HTTP: " + String(lastCloudCode);
+  tft.drawString(ipStr, 5, 215, 1);
+  tft.drawString(codeStr, 5, 228, 1);
+}
+
+void checkTouch() {
+  if (touch.touched()) {
+    TS_Point p = touch.getPoint();
+    // Rotation Mapping for Touch (Landscape)
+    int touchX = map(p.x, 300, 3800, 0, 320);
+    int touchY = map(p.y, 300, 3800, 0, 240);
+    
+    // Check if touched the WIFI CFG button (230, 208, 85, 28)
+    if (touchX > 220 && touchX < 320 && touchY > 195 && touchY < 240) {
+      tft.fillScreen(TFT_BLACK);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString("Resetting WiFi...", 160, 100, 4);
+      tft.drawString("Please wait.", 160, 130, 2);
+      delay(1000);
+      WiFiManager wm;
+      wm.resetSettings();
+      ESP.restart();
+    }
+  }
+}
+
+// --- 6. ฟังก์ชัน Setup & Loop ---
 void setup() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ป้องกัน Brownout Reset จากไฟ USB ตกขณะเปิด WiFi
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ปิด Brownout
   Serial.begin(115200);
 
-  // 1. เปิดไฟ Backlight หน้าจอ CYD ESP32 (GPIO 21) ล็อคค้างไว้ ห้ามสั่งเปลี่ยนพิน
-  pinMode(21, OUTPUT);
-  digitalWrite(21, HIGH);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
 
-  tft.init(); 
-  tft.setRotation(1);
-
-  // 2. เริ่มต้นระบบทัชสกรีน XPT2046
   touchSpi.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
-  touch.begin(touchSpi); 
+  touch.begin();
   touch.setRotation(1);
 
-  // 3. อ่านค่าเซนเซอร์ครั้งแรก
-  readSensorAuto();
-  drawUI();
-
-  configTime(25200, 0, "asia.pool.ntp.org", "pool.ntp.org", "time.nist.gov");
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  tft.init();
+  tft.setRotation(1);
   
-  if (strlen(WIFI_SSID) > 0) {
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    int retry = 0;
-    while (WiFi.status() != WL_CONNECTED && retry < 30) {
-      delay(500);
-      retry++;
-    }
-  } else {
-    WiFiManager wm;
-    wm.setConfigPortalTimeout(120);
-    wm.setBreakAfterConfig(true);
-    wm.autoConnect("CYD_ESP32_SYNC");
+  // Initial Loading Screen
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Connecting WiFi...", 160, 100, 4);
+  tft.drawString("Use phone to connect CYD_ESP32_LIGHT", 160, 140, 2);
+
+  // Default WiFi Fallback
+  WiFi.mode(WIFI_STA);
+  WiFi.begin("Mai_home_2.4G", "0909142651");
+  int retry = 0;
+  while(WiFi.status() != WL_CONNECTED && retry < 15) {
+     delay(500);
+     Serial.print(".");
+     retry++;
   }
+
+  // Setup WiFi Manager if hardcoded one fails
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(180); 
+    if (!wm.startConfigPortal("CYD_ESP32_LIGHT")) {
+      Serial.println("Failed to connect or hit timeout");
+      delay(3000);
+      ESP.restart();
+    }
+  }
+
+  Serial.println("\\nWiFi Connected!");
+  Serial.print("IP: "); Serial.println(WiFi.localIP());
+
+  // Setup Time
+  configTime(25200, 0, "asia.pool.ntp.org", "pool.ntp.org", "time.nist.gov");
 
   drawUI();
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    static unsigned long lastWiFiRetry = 0;
-    if (millis() - lastWiFiRetry > 10000) {
-      lastWiFiRetry = millis();
-      if (strlen(WIFI_SSID) > 0) {
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      } else {
-        WiFi.reconnect();
-      }
-    }
+  checkTouch();
+
+  // Update Time every second
+  if (millis() - lastTimeUpdate > 1000) {
+    drawTime();
+    lastTimeUpdate = millis();
   }
 
-  if (millis() - lastClockUpdate > 1000) {
-    lastClockUpdate = millis();
-    drawHeaderStatus();
-  }
-
-  // 1. อ่านเซนเซอร์ทุก 2.5 วินาที
-  if (millis() - lastSensorRead > 2500) {
-    lastSensorRead = millis();
-    readSensorAuto();
-    drawSensorValues();
-    drawStatusCard();
-  }
-
-  // 2. ทัชสกรีนปุ่มกด 3 ปุ่มด้านล่าง
-  if (touch.touched()) {
-    TS_Point p = touch.getPoint();
-    int screenX = map(p.x, 200, 3800, 0, 320);
-    int screenY = map(p.y, 240, 3800, 0, 240);
+  // Update Sensor Data & Cloud
+  if (millis() - lastSend > (sendIntervalSec * 1000) || lastSend == 0) {
+    scanAndReadSensor();
     
-    if (screenY > 185) {
-      if (screenX < 105) {
-        lastSend = 0;
-        drawStatusCard();
-        delay(200);
-      } else if (screenX >= 105) {
-        WiFiManager wm; wm.resetSettings(); ESP.restart();
-      }
-    }
-  }
-
-  // 3. ส่งข้อมูลขึ้น Cloud ด้วย ArduinoJson v7
-  if ((millis() - lastSend > (sendIntervalSec * 1000)) && WiFi.status() == WL_CONNECTED) {
-    WiFiClientSecure client; client.setInsecure();
-    HTTPClient http;
-    http.setTimeout(8000);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    if (http.begin(client, serverUrl)) {
-      http.addHeader("Content-Type", "application/json");
-      http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
-
-      JsonDocument docOut;
-      docOut["temperature"] = temp;
-      docOut["humidity"] = humi;
-      docOut["sensor_error"] = isSensorError;
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFiClientSecure client; client.setInsecure();
+      HTTPClient http;
+      http.setTimeout(8000);
+      http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
       
-      String json;
-      serializeJson(docOut, json);
+      if (http.begin(client, serverUrl)) {
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
+        
+        time_t now; time(&now);
+        String json = "{";
+        json += "\\"fields\\": {";
+        json += "\\"temperature\\": {\\"doubleValue\\": " + String(temp, 1) + "},";
+        json += "\\"humidity\\": {\\"doubleValue\\": " + String(humi, 1) + "},";
+        json += "\\"sensor_error\\": {\\"booleanValue\\": " + String(isSensorError ? "true" : "false") + "},";
+        json += "\\"timestamp\\": {\\"integerValue\\": \\"" + String((unsigned long)now) + "000\\"}";
+        json += "}}";
 
-      lastCloudCode = http.POST(json);
-      if (lastCloudCode == 200) {
-        String response = http.getString();
-        JsonDocument docIn;
-        DeserializationError error = deserializeJson(docIn, response);
-        if (!error && docIn.containsKey("config")) {
-          JsonObject cfg = docIn["config"];
-          sendIntervalSec = cfg["sendIntervalSec"] | sendIntervalSec;
-          maxTemp = cfg["maxTemp"] | maxTemp;
-          maxHum = cfg["maxHum"] | maxHum;
-
-          }
+        Serial.println("Sending Data...");
+        lastCloudCode = http.POST(json);
+        Serial.print("HTTP: "); Serial.println(lastCloudCode);
+        http.end();
       }
-      drawStatusCard();
-      http.end();
     }
+    
+    drawStatusCard();
     lastSend = millis();
   }
-}`;
+}
+`;
 
   const handleCopyCode = (textToCopy: string) => {
     navigator.clipboard.writeText(textToCopy);
@@ -1257,7 +940,7 @@ void loop() {
       )}
 
       {/* Navbar */}
-      <nav className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 sm:px-8 shrink-0 shadow-sm z-10">
+      <nav className="h-16 bg-white border-b border-slate-200 hidden md:flex items-center justify-between px-4 sm:px-8 shrink-0 shadow-sm z-10">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
             <Activity className="w-5 h-5 text-white" />
@@ -1316,7 +999,7 @@ void loop() {
         </div>
       </nav>
 
-      <main className="flex-1 flex p-4 sm:p-6 gap-6 overflow-hidden relative max-w-[1600px] mx-auto w-full">
+      <main className="flex-1 flex flex-col md:flex-row p-4 sm:p-6 gap-4 sm:gap-6 md:overflow-hidden overflow-y-auto relative max-w-[1600px] mx-auto w-full">
         
         {/* ESP32 C++ Code Modal */}
         {showCodeModal && (
@@ -1329,7 +1012,7 @@ void loop() {
                   </div>
                   <div>
                     <h2 className="text-base sm:text-lg font-bold">โค้ด ESP32 CYD (ออกแบบหน้าจอใหม่ ตัวใหญ่ + วันเวลา NTP)</h2>
-                    <p className="text-xs text-blue-300">✨ หน้าจอดีไซน์ใหม่ ตัวเลขใหญ่ คมชัด อ่านง่าย + แสดงวัน/เวลาปัจจุบันอัตโนมัติ</p>
+                    <p className="text-xs text-blue-300">✨ หน้าจอใหม่: อุณหภูมิ/ความชื้นใหญ่พิเศษ + ตั้งเวลาอัตโนมัติ + มีปุ่มกด [WIFI CFG] บนจอเพื่อเปลี่ยน WiFi</p>
                   </div>
                 </div>
                 
@@ -2138,10 +1821,10 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
         )}
 
         {/* Sidebar */}
-        <aside className="w-80 flex flex-col gap-6 h-full shrink-0 overflow-y-auto hidden md:flex">
+        <aside className="w-full md:w-80 flex flex-col gap-4 sm:gap-6 shrink-0 md:h-full md:overflow-y-auto">
           
           {/* Interval Setting */}
-          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm shrink-0 space-y-4">
+          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm shrink-0 space-y-4 hidden md:block">
             <div className="flex items-center justify-between">
               <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
                 <Clock className="w-4 h-4 text-blue-600" /> ตั้งค่าระบบ (Settings)
@@ -2220,7 +1903,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
           </div>
 
           {/* Alerts Log Panel */}
-          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex-1 flex flex-col min-h-[200px]">
+          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex-1 flex-col min-h-[200px] hidden md:flex">
             <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">ระบบแจ้งเตือน (Alerts Log)</h2>
             <div className="space-y-3 overflow-y-auto pr-2 flex-1 scrollbar-thin">
               {activeAlerts.length > 0 ? (
@@ -2247,7 +1930,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
         </aside>
 
         {/* Main Charts Section */}
-        <section className="flex-1 flex flex-col gap-4 sm:gap-6 overflow-y-auto md:overflow-hidden min-w-0">
+        <section className="flex-1 flex flex-col gap-4 sm:gap-6 md:overflow-y-auto min-w-0">
           
           {/* Mobile Status & Control Bar */}
           <div className="md:hidden flex flex-col gap-3 p-4 bg-white rounded-2xl border border-slate-200 shrink-0 shadow-sm">

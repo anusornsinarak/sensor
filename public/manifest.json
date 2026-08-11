@@ -1,0 +1,15 @@
+{
+  "short_name": "SensorFlow",
+  "name": "SensorFlow Realtime Cloud",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%232563eb'><path d='M2 12h4l2-5 4 10 3-8 2 3h5v2h-6l-2-3-3 8-4-10-2 5H2z'/></svg>",
+      "type": "image/svg+xml",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#ffffff",
+  "background_color": "#ffffff"
+}
