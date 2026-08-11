@@ -59,6 +59,8 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
+  app.use(express.text({ type: '*/*' }));
 
   // API Route: Get device settings
   app.get('/api/device-config', (req, res) => {
@@ -103,7 +105,18 @@ async function startServer() {
 
   // API Route: Receive data from ESP32
   app.post('/api/sensor-data', async (req, res) => {
-    const { temperature, humidity, sensor_error } = req.body;
+    let bodyData = req.body;
+    if (typeof bodyData === 'string') {
+      try {
+        bodyData = JSON.parse(bodyData);
+      } catch (e) {
+        bodyData = {};
+      }
+    }
+
+    const temperature = bodyData?.temperature ?? req.query?.temperature;
+    const humidity = bodyData?.humidity ?? req.query?.humidity;
+    const sensor_error = bodyData?.sensor_error ?? req.query?.sensor_error;
     
     if (temperature == null || humidity == null) {
       res.status(400).json({ error: 'Missing temperature or humidity' });
@@ -123,8 +136,17 @@ async function startServer() {
       }
     }
 
+    let rawTs = bodyData?.timestamp || req.query?.timestamp;
+    let finalTimestamp = Date.now();
+    if (rawTs) {
+      const parsedTs = Number(rawTs);
+      if (!isNaN(parsedTs) && parsedTs > 0) {
+        finalTimestamp = parsedTs < 10000000000 ? parsedTs * 1000 : parsedTs;
+      }
+    }
+
     const newData: SensorData = {
-      timestamp: Date.now(),
+      timestamp: finalTimestamp,
       temperature: tempNum,
       humidity: humNum,
       ...(isError ? { sensor_error: true } : {}),
