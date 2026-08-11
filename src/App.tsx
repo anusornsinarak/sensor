@@ -57,6 +57,39 @@ export default function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshToast, setRefreshToast] = useState<string | null>(null);
 
+  const [manualTemp, setManualTemp] = useState<string>('24.9');
+  const [manualHum, setManualHum] = useState<string>('60.8');
+  const [isSubmittingManual, setIsSubmittingManual] = useState<boolean>(false);
+
+  const handleManualSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const tempVal = parseFloat(manualTemp);
+    const humVal = parseFloat(manualHum);
+    if (isNaN(tempVal) || isNaN(humVal)) return;
+
+    setIsSubmittingManual(true);
+    try {
+      const res = await fetch('/api/sensor-data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          temperature: tempVal,
+          humidity: humVal,
+          sensor_error: false,
+        }),
+      });
+      if (res.ok) {
+        setRefreshToast(`อัปเดตข้อมูลเป็น ${tempVal}°C, ${humVal}% สำเร็จแล้ว`);
+        setTimeout(() => setRefreshToast(null), 3000);
+        handleRefreshData();
+      }
+    } catch (err) {
+      console.error('Failed to submit manual reading:', err);
+    } finally {
+      setIsSubmittingManual(false);
+    }
+  };
+
   // Manual Instant Refresh Handler
   const handleRefreshData = async () => {
     setIsRefreshing(true);
@@ -2166,6 +2199,51 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
         {/* Sidebar */}
         <aside className="w-80 flex flex-col gap-6 h-full shrink-0 overflow-y-auto hidden md:flex">
           
+          {/* Quick Manual Entry Card */}
+          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm shrink-0 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Thermometer className="w-4 h-4 text-emerald-600" /> ป้อน/ซิงก์ค่าจากเครื่องมือวัดจริง
+              </h2>
+            </div>
+            
+            <form onSubmit={handleManualSubmit} className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">อุณหภูมิ (°C)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={manualTemp}
+                    onChange={(e) => setManualTemp(e.target.value)}
+                    className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-emerald-500 outline-none text-xs font-bold font-mono text-slate-800"
+                    placeholder="24.9"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">ความชื้น (%)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={manualHum}
+                    onChange={(e) => setManualHum(e.target.value)}
+                    className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-emerald-500 outline-none text-xs font-bold font-mono text-slate-800"
+                    placeholder="60.8"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmittingManual}
+                className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-sm flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>{isSubmittingManual ? 'กำลังบันทึก...' : 'บันทึกค่าลงระบบทันที'}</span>
+              </button>
+            </form>
+          </div>
+
           {/* Remote Hardware Control Card */}
           <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm shrink-0 space-y-4">
             <div className="flex items-center justify-between">
