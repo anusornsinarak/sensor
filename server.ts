@@ -137,8 +137,13 @@ async function startServer() {
       ...(isError ? { sensor_error: true } : {}),
     };
 
+    activeSettings.updatedAt = Date.now();
+
     try {
       const docRef = await addDoc(collection(db, 'sensor_data'), newData);
+      // Also update lastSeen in device_settings so clients receive instant online heartbeat
+      await setDoc(doc(db, 'device_settings', 'config'), { ...activeSettings, lastSeen: Date.now() }, { merge: true });
+
       // Return response along with current activeSettings (including fan control state and threshold)
       res.json({ 
         success: true, 

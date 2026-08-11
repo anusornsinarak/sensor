@@ -49,6 +49,7 @@ export default function App() {
   });
 
   const [showSettings, setShowSettings] = useState(false);
+  const [lastPacketReceivedClientTime, setLastPacketReceivedClientTime] = useState<number>(Date.now());
 
   // 1. Fetch real-time sensor data from Firestore
   useEffect(() => {
@@ -66,6 +67,9 @@ export default function App() {
       
       sensorReadings.sort((a, b) => a.timestamp - b.timestamp);
       setData(sensorReadings);
+      if (sensorReadings.length > 0) {
+        setLastPacketReceivedClientTime(Date.now());
+      }
     }, (error) => {
       console.error("Firestore real-time subscription error:", error);
     });
@@ -188,18 +192,21 @@ export default function App() {
     if (!latestData) {
       return { status: 'OFFLINE', label: 'รอการเชื่อมต่อ ESP32', color: 'slate', icon: WifiOff };
     }
-    const timeDiff = Date.now() - latestData.timestamp;
-    const isOffline = timeDiff > 3 * 60 * 1000;
+    const clientTimeDiff = Date.now() - lastPacketReceivedClientTime;
+    const serverTimeDiff = Math.abs(Date.now() - latestData.timestamp);
+
+    // Consider OFFLINE only if no client-side packet received for > 5 mins AND last record is > 5 mins old
+    const isOffline = clientTimeDiff > 5 * 60 * 1000 && serverTimeDiff > 5 * 60 * 1000;
     const isSensorError = Boolean(latestData.sensor_error) || (latestData.temperature === 0 && latestData.humidity === 0);
 
     if (isOffline) {
-      return { status: 'OFFLINE', label: 'ESP32 OFFLINE (>3 นาที)', color: 'red', icon: WifiOff };
+      return { status: 'OFFLINE', label: 'ESP32 OFFLINE (>5 นาที)', color: 'red', icon: WifiOff };
     }
     if (isSensorError) {
       return { status: 'SENSOR_ERROR', label: 'ESP32 ONLINE (SENSOR FAULT / ค่า 0)', color: 'amber', icon: AlertTriangle };
     }
     return { status: 'ONLINE', label: 'ESP32 CONNECTED & ONLINE', color: 'green', icon: Wifi };
-  }, [latestData]);
+  }, [latestData, lastPacketReceivedClientTime]);
 
   // Alerts logic
   const activeAlerts = useMemo(() => {
