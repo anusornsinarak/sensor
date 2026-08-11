@@ -296,7 +296,7 @@ const char* WIFI_SSID = "Mai_home_2.4G";     // ชื่อ WiFi ของค�
 const char* WIFI_PASSWORD = "0909142651"; // รหัสผ่าน WiFi ของคุณ
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
-const char* serverUrl = "${serverUrlEndpoint}";
+const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-client-0516953163/databases/ai-studio-iotsensordashboa-6c74a260-d381-44d8-ae58-a587051c2d98/documents/sensor_data?key=AIzaSyCXLGKCPAStDBt0RTcCUdX3ew4c_uB6oxs";
 
 // --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32-2432S028) ---
 #define XPT2046_IRQ   36
@@ -731,11 +731,14 @@ void loop() {
       http.addHeader("Content-Type", "application/json");
       http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
 
+      time_t now; time(&now);
       String json = "{";
-      json += "\\\"temperature\\\":" + String(temp, 1) + ",";
-      json += "\\\"humidity\\\":" + String(humi, 1) + ",";
-      json += "\\\"sensor_error\\\":" + String(isSensorError ? "true" : "false");
-      json += "}";
+      json += "\\"fields\\": {";
+      json += "\\"temperature\\": {\\"doubleValue\\": " + String(temp, 1) + "},";
+      json += "\\"humidity\\": {\\"doubleValue\\": " + String(humi, 1) + "},";
+      json += "\\"sensor_error\\": {\\"booleanValue\\": " + String(isSensorError ? "true" : "false") + "},";
+      json += "\\"timestamp\\": {\\"integerValue\\": \\"" + String((unsigned long)now) + "000\\"}";
+      json += "}}";
 
       Serial.println("Sending Data to Cloud...");
       Serial.println(json);
@@ -782,7 +785,7 @@ const char* WIFI_SSID = "Mai_home_2.4G";     // ชื่อ WiFi ของค�
 const char* WIFI_PASSWORD = "0909142651"; // รหัสผ่าน WiFi ของคุณ
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
-const char* serverUrl = "${serverUrlEndpoint}";
+const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-client-0516953163/databases/ai-studio-iotsensordashboa-6c74a260-d381-44d8-ae58-a587051c2d98/documents/sensor_data?key=AIzaSyCXLGKCPAStDBt0RTcCUdX3ew4c_uB6oxs";
 
 // --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32-2432S028) ---
 #define XPT2046_IRQ   36
