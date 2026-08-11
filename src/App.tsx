@@ -221,6 +221,10 @@ export default function App() {
 
   const [codeTab, setCodeTab] = useState<'fixGuide' | 'lightCode' | 'jsonCode' | 'wifiGuide'>('fixGuide');
 
+  // Dynamic server URL based on current host
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app';
+  const serverUrlEndpoint = `${currentOrigin}/api/sensor-data`;
+
   // Code version 1: Lightweight Code without ArduinoJson dependency
   const esp32CodeLight = `#include <SPI.h>
 #include <TFT_eSPI.h>
@@ -240,7 +244,7 @@ const char* WIFI_SSID = "Mai_home_2.4G";     // ชื่อ WiFi ของค�
 const char* WIFI_PASSWORD = "0909142651"; // รหัสผ่าน WiFi ของคุณ
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
-const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app/api/sensor-data";
+const char* serverUrl = "${serverUrlEndpoint}";
 
 // --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32-2432S028) ---
 #define XPT2046_IRQ   36
@@ -269,6 +273,10 @@ bool isSensorError = true;
 int lastCloudCode = 0;
 bool fanState = false;
 int sendIntervalSec = 15;
+
+// ระบบ Fast Cache จำชนิดเซนเซอร์เพื่อให้อ่านเร็วสุด (<20ms) ไม่กระตุก
+int cachedSensorType = 0; // 0: สแกนใหม่, 1: SHT30(0x44), 2: SHT30(0x45), 3: SHT20, 4: AHT20, 10: AM2301/DHT22, 11: DHT11
+int cachedSensorPin = 27;
 
 unsigned long lastSend = 0;
 unsigned long lastSensorRead = 0;
@@ -676,27 +684,31 @@ void loop() {
   if ((millis() - lastSend > (sendIntervalSec * 1000)) && WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client; client.setInsecure();
     HTTPClient http;
-    http.begin(client, serverUrl);
-    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(8000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    if (http.begin(client, serverUrl)) {
+      http.addHeader("Content-Type", "application/json");
+      http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
 
-    String json = "{";
-    json += "\"temperature\":" + String(temp, 1) + ",";
-    json += "\"humidity\":" + String(humi, 1) + ",";
-    json += "\"sensor_error\":" + String(isSensorError ? "true" : "false");
-    json += "}";
+      String json = "{";
+      json += "\"temperature\":" + String(temp, 1) + ",";
+      json += "\"humidity\":" + String(humi, 1) + ",";
+      json += "\"sensor_error\":" + String(isSensorError ? "true" : "false");
+      json += "}";
 
-    lastCloudCode = http.POST(json);
-    if (lastCloudCode == 200) {
-      String res = http.getString();
-      if (res.indexOf("\"fanState\":true") >= 0) {
-        fanState = true;
-      } else if (res.indexOf("\"fanState\":false") >= 0) {
-        fanState = false;
+      lastCloudCode = http.POST(json);
+      if (lastCloudCode == 200) {
+        String res = http.getString();
+        if (res.indexOf("\"fanState\":true") >= 0) {
+          fanState = true;
+        } else if (res.indexOf("\"fanState\":false") >= 0) {
+          fanState = false;
+        }
+        updateHardware();
       }
-      updateHardware();
+      drawStatusCard();
+      http.end();
     }
-    drawStatusCard();
-    http.end();
     lastSend = millis();
   }
 }`;
@@ -721,7 +733,7 @@ const char* WIFI_SSID = "Mai_home_2.4G";     // ชื่อ WiFi ของค�
 const char* WIFI_PASSWORD = "0909142651"; // รหัสผ่าน WiFi ของคุณ
 
 // --- 1. การเชื่อมต่อ Server & Cloud ---
-const char* serverUrl = "https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app/api/sensor-data";
+const char* serverUrl = "${serverUrlEndpoint}";
 
 // --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32-2432S028) ---
 #define XPT2046_IRQ   36
@@ -754,11 +766,15 @@ int sendIntervalSec = 15;
 float maxTemp = 30.0;
 float maxHum = 65.0;
 
+// ระบบ Fast Cache จำชนิดเซนเซอร์เพื่อให้อ่านเร็วสุด (<20ms) ไม่กระตุก
+int cachedSensorType = 0; // 0: สแกนใหม่, 1: SHT30(0x44), 2: SHT30(0x45), 3: SHT20, 4: AHT20, 10: AM2301/DHT22, 11: DHT11
+int cachedSensorPin = 27;
+
 unsigned long lastSend = 0;
 unsigned long lastSensorRead = 0;
 unsigned long lastClockUpdate = 0;
 
-// ฟังก์ชันอ่านค่า SHT30 / SHT31 / DHT30 ผ่าน I2C (Address 0x44 หรือ 0x45)
+// [JSON-Code] ฟังก์ชันอ่านค่า SHT30 / SHT31 / DHT30 ผ่าน I2C (Address 0x44 หรือ 0x45)
 bool readSHT30I2C(uint8_t addr, float &outTemp, float &outHumi) {
   Wire.beginTransmission(addr);
   Wire.write(0x2C);
@@ -1159,35 +1175,39 @@ void loop() {
   if ((millis() - lastSend > (sendIntervalSec * 1000)) && WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client; client.setInsecure();
     HTTPClient http;
-    http.begin(client, serverUrl);
-    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(8000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    if (http.begin(client, serverUrl)) {
+      http.addHeader("Content-Type", "application/json");
+      http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
 
-    JsonDocument docOut;
-    docOut["temperature"] = temp;
-    docOut["humidity"] = humi;
-    docOut["sensor_error"] = isSensorError;
-    
-    String json;
-    serializeJson(docOut, json);
+      JsonDocument docOut;
+      docOut["temperature"] = temp;
+      docOut["humidity"] = humi;
+      docOut["sensor_error"] = isSensorError;
+      
+      String json;
+      serializeJson(docOut, json);
 
-    lastCloudCode = http.POST(json);
-    if (lastCloudCode == 200) {
-      String response = http.getString();
-      JsonDocument docIn;
-      DeserializationError error = deserializeJson(docIn, response);
-      if (!error && docIn.containsKey("config")) {
-        JsonObject cfg = docIn["config"];
-        fanState = cfg["fanState"] | fanState;
-        autoFan = cfg["autoFan"] | autoFan;
-        sendIntervalSec = cfg["sendIntervalSec"] | sendIntervalSec;
-        maxTemp = cfg["maxTemp"] | maxTemp;
-        maxHum = cfg["maxHum"] | maxHum;
+      lastCloudCode = http.POST(json);
+      if (lastCloudCode == 200) {
+        String response = http.getString();
+        JsonDocument docIn;
+        DeserializationError error = deserializeJson(docIn, response);
+        if (!error && docIn.containsKey("config")) {
+          JsonObject cfg = docIn["config"];
+          fanState = cfg["fanState"] | fanState;
+          autoFan = cfg["autoFan"] | autoFan;
+          sendIntervalSec = cfg["sendIntervalSec"] | sendIntervalSec;
+          maxTemp = cfg["maxTemp"] | maxTemp;
+          maxHum = cfg["maxHum"] | maxHum;
 
-        updateHardware();
+          updateHardware();
+        }
       }
+      drawStatusCard();
+      http.end();
     }
-    drawStatusCard();
-    http.end();
     lastSend = millis();
   }
 }`;

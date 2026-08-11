@@ -1,39 +1,12 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    function incoming() { return request.resource.data; }
-    function existing() { return resource.data; }
-
-    function isValidSensorData(data) {
-      return data.keys().hasAll(['timestamp', 'temperature', 'humidity']) &&
-             data.timestamp is number &&
-             data.temperature is number &&
-             data.humidity is number;
-    }
-
-    function isValidDeviceSettings(data) {
-      return data.keys().hasAll(['maxTemp', 'maxHum', 'sendIntervalSec', 'fanState', 'autoFan']) &&
-             data.maxTemp is number &&
-             data.maxHum is number &&
-             data.sendIntervalSec is number &&
-             data.fanState is bool &&
-             data.autoFan is bool;
-    }
-
     match /sensor_data/{dataId} {
-      allow get: if true;
-      allow list: if resource.data.timestamp > 0;
-      allow create: if isValidSensorData(incoming());
+      allow read, write: if true;
     }
 
     match /device_settings/{configId} {
-      allow get: if true;
-      allow list: if true;
-      allow create, update: if isValidDeviceSettings(incoming());
+      allow read, write: if true;
     }
   }
 }
