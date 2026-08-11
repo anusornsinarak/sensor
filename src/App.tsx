@@ -335,6 +335,7 @@ int cachedSensorType = 0; // 0: สแกนใหม่, 1: SHT30(0x44), 2: SHT
 int cachedSensorPin = 27;
 
 unsigned long lastSend = 0;
+String lastSyncOK = "--:--";
 unsigned long lastSensorRead = 0;
 unsigned long lastClockUpdate = 0;
 
@@ -592,11 +593,8 @@ void drawStatusCard() {
   tft.setTextColor(isSensorError ? TFT_RED : TFT_GREEN, COLOR_CARD_BG);
   tft.drawString(isSensorError ? "STATUS: SENSOR ERR" : "STATUS: NORMAL", 14, 162, 2);
 
-  struct tm timeinfo;
-  char timeStr[10] = "--:--";
-  if (getLocalTime(&timeinfo)) strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
   tft.setTextColor(COLOR_MUTED, COLOR_CARD_BG);
-  tft.drawString("Last Sync: " + String(timeStr), 180, 162, 2);
+  tft.drawString("Last OK: " + lastSyncOK + "  ", 180, 162, 2);
 }
 
 // 4. ออกแบบหน้าจอ TFT ใหม่
@@ -754,6 +752,12 @@ void loop() {
 
       lastCloudCode = http.POST(json);
       if (lastCloudCode == 200) {
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo)) {
+          char timeStr[10];
+          strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+          lastSyncOK = String(timeStr);
+        }
         String res = http.getString();
         if (res.indexOf("\"fanState\":true") >= 0) {
           fanState = true;
@@ -827,6 +831,7 @@ int cachedSensorType = 0; // 0: สแกนใหม่, 1: SHT30(0x44), 2: SHT
 int cachedSensorPin = 27;
 
 unsigned long lastSend = 0;
+String lastSyncOK = "--:--";
 unsigned long lastSensorRead = 0;
 unsigned long lastClockUpdate = 0;
 
@@ -1083,11 +1088,8 @@ void drawStatusCard() {
   tft.setTextColor(isSensorError ? TFT_RED : TFT_GREEN, COLOR_CARD_BG);
   tft.drawString(isSensorError ? "STATUS: SENSOR ERR" : "STATUS: NORMAL", 14, 162, 2);
 
-  struct tm timeinfo;
-  char timeStr[10] = "--:--";
-  if (getLocalTime(&timeinfo)) strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
   tft.setTextColor(COLOR_MUTED, COLOR_CARD_BG);
-  tft.drawString("Last Sync: " + String(timeStr), 180, 162, 2);
+  tft.drawString("Last OK: " + lastSyncOK + "  ", 180, 162, 2);
 }
 
 // 4. ออกแบบหน้าจอ TFT ใหม่
