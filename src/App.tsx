@@ -275,7 +275,7 @@ export default function App() {
 
   // Dynamic server URL based on current host
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app';
-  const serverUrlEndpoint = `${currentOrigin}/api/sensor-data`;
+  const serverUrlEndpoint = `${currentOrigin.replace('ais-dev-', 'ais-pre-')}/api/sensor-data`;
 
   // Code version 1: Lightweight Code without ArduinoJson dependency
   const esp32CodeLight = `#include <SPI.h>
