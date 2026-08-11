@@ -1,36 +1,46 @@
 import fs from 'fs';
 let code = fs.readFileSync('src/App.tsx', 'utf8');
 
-const target = `// 3. ฟังก์ชันอัปเดตการ์ดสถานะ Cloud & Alert
-void drawStatusCard() {
-  tft.fillRect(10, 138, 300, 44, COLOR_CARD_BG);
-  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
-  String cloudText = "Cloud: " + String(lastCloudCode == 200 ? "Synced (200 OK)" : (lastCloudCode == 0 ? "Connecting..." : "Error " + String(lastCloudCode)));
-  tft.drawString(cloudText, 14, 142, 2);
+// Replace the invalid string literal concatenation in Tab 2
+const oldCode = `      String json = "{";
+      json += """temperature":"" + String(temp, 1) + ",";
+      json += """humidity":"" + String(humi, 1) + ",";
+      json += """sensor_error":"" + String(isSensorError ? "true" : "false");
+      json += "}";`;
 
-  tft.setTextColor(isSensorError ? TFT_RED : TFT_GREEN, COLOR_CARD_BG);
-  tft.drawString(isSensorError ? "STATUS: SENSOR ERR" : "STATUS: NORMAL", 14, 162, 2);
+const newCode = `      String json = "{";
+      json += "\\"temperature\\":" + String(temp, 1) + ",";
+      json += "\\"humidity\\":" + String(humi, 1) + ",";
+      json += "\\"sensor_error\\":" + String(isSensorError ? "true" : "false");
+      json += "}";`;
 
-  struct tm timeinfo;
-  char timeStr[10] = "--:--";
-  if (getLocalTime(&timeinfo)) strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
-  tft.setTextColor(COLOR_MUTED, COLOR_CARD_BG);
-  tft.drawString("Last Sync: " + String(timeStr), 180, 162, 2);
-}`;
+code = code.replace(oldCode, newCode);
 
-const replacement = `// 3. ฟังก์ชันอัปเดตการ์ดสถานะ Cloud & Alert
-void drawStatusCard() {
-  tft.fillRect(10, 138, 300, 44, COLOR_CARD_BG);
-  tft.setTextColor(TFT_WHITE, COLOR_CARD_BG);
-  String cloudText = "Cloud: " + String(lastCloudCode == 200 ? "Synced (200 OK)" : (lastCloudCode == 0 ? "Connecting..." : "Error " + String(lastCloudCode)));
-  tft.drawString(cloudText, 14, 142, 2);
+// Also replace the parsing logic in Tab 2
+const oldParsing = `        if (res.indexOf("""fanState":true") >= 0) {
+          fanState = true;
+        } else if (res.indexOf("""fanState":false") >= 0) {
+          fanState = false;
+        }
 
-  tft.setTextColor(isSensorError ? TFT_RED : TFT_GREEN, COLOR_CARD_BG);
-  tft.drawString(isSensorError ? "STATUS: SENSOR ERR" : "STATUS: NORMAL", 14, 162, 2);
+        if (res.indexOf("""autoFan":true") >= 0) {
+          autoFan = true;
+        } else if (res.indexOf("""autoFan":false") >= 0) {
+          autoFan = false;
+        }`;
 
-  tft.setTextColor(COLOR_MUTED, COLOR_CARD_BG);
-  tft.drawString("Last OK: " + lastSyncOK + "  ", 180, 162, 2);
-}`;
+const newParsing = `        if (res.indexOf("\\"fanState\\":true") >= 0) {
+          fanState = true;
+        } else if (res.indexOf("\\"fanState\\":false") >= 0) {
+          fanState = false;
+        }
 
-code = code.split(target).join(replacement);
+        if (res.indexOf("\\"autoFan\\":true") >= 0) {
+          autoFan = true;
+        } else if (res.indexOf("\\"autoFan\\":false") >= 0) {
+          autoFan = false;
+        }`;
+
+code = code.replace(oldParsing, newParsing);
+
 fs.writeFileSync('src/App.tsx', code);

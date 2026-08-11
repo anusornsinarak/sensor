@@ -745,9 +745,9 @@ void loop() {
       http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
 
       String json = "{";
-      json += "\"temperature\":" + String(temp, 1) + ",";
-      json += "\"humidity\":" + String(humi, 1) + ",";
-      json += "\"sensor_error\":" + String(isSensorError ? "true" : "false");
+      json += "\\\"temperature\\\":" + String(temp, 1) + ",";
+      json += "\\\"humidity\\\":" + String(humi, 1) + ",";
+      json += "\\\"sensor_error\\\":" + String(isSensorError ? "true" : "false");
       json += "}";
 
       lastCloudCode = http.POST(json);
