@@ -22,8 +22,6 @@ interface DeviceSettings {
   sendIntervalSec: number;
   tempOffset?: number;
   humOffset?: number;
-  fanState: boolean;
-  autoFan: boolean;
   updatedAt: number;
 }
 
@@ -33,8 +31,6 @@ let activeSettings: DeviceSettings = {
   sendIntervalSec: 60,
   tempOffset: 0,
   humOffset: 0,
-  fanState: false,
-  autoFan: true,
   updatedAt: Date.now(),
 };
 
@@ -69,15 +65,13 @@ async function startServer() {
 
   // API Route: Update device settings (from Web App)
   app.post('/api/device-config', async (req, res) => {
-    const { maxTemp, maxHum, sendIntervalSec, tempOffset, humOffset, fanState, autoFan } = req.body;
+    const { maxTemp, maxHum, sendIntervalSec, tempOffset, humOffset } = req.body;
     
     if (maxTemp != null) activeSettings.maxTemp = Number(maxTemp);
     if (maxHum != null) activeSettings.maxHum = Number(maxHum);
     if (sendIntervalSec != null) activeSettings.sendIntervalSec = Number(sendIntervalSec);
     if (tempOffset != null) activeSettings.tempOffset = Number(tempOffset);
     if (humOffset != null) activeSettings.humOffset = Number(humOffset);
-    if (fanState != null) activeSettings.fanState = Boolean(fanState);
-    if (autoFan != null) activeSettings.autoFan = Boolean(autoFan);
     activeSettings.updatedAt = Date.now();
 
     try {
@@ -127,14 +121,6 @@ async function startServer() {
     const humNum = Number(humidity);
     const isError = Boolean(sensor_error) || (tempNum === 0 && humNum === 0);
 
-    // Auto fan control logic if enabled
-    if (activeSettings.autoFan && !isError) {
-      if (tempNum > activeSettings.maxTemp || humNum > activeSettings.maxHum) {
-        activeSettings.fanState = true;
-      } else {
-        activeSettings.fanState = false;
-      }
-    }
 
     let rawTs = bodyData?.timestamp || req.query?.timestamp;
     let finalTimestamp = Date.now();

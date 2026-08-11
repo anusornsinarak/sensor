@@ -29,8 +29,6 @@ interface DeviceSettings {
   sendIntervalSec: number;
   tempOffset?: number;
   humOffset?: number;
-  fanState: boolean;
-  autoFan: boolean;
   updatedAt?: number;
 }
 
@@ -48,8 +46,6 @@ export default function App() {
     sendIntervalSec: 60,
     tempOffset: 0,
     humOffset: 0,
-    fanState: false,
-    autoFan: true,
   });
 
   const [showSettings, setShowSettings] = useState(false);
@@ -308,7 +304,6 @@ const char* serverUrl = "${serverUrlEndpoint}";
 #define XPT2046_MISO  39
 #define XPT2046_CLK   25
 #define XPT2046_CS    33
-#define RELAY_PIN     22  // ขาควบคุม Relay พัดลม (หรือ Pin 4 LED)
 #define TFT_BL        21  // ขาควบคุมไฟหลังจอ Backlight CYD ESP32 (ห้ามใช้ต่อเซนเซอร์)
 
 SPIClass touchSpi = SPIClass(VSPI);
@@ -327,7 +322,6 @@ TFT_eSPI tft = TFT_eSPI();
 float temp = 0, humi = 0;
 bool isSensorError = true;
 int lastCloudCode = 0;
-bool fanState = false;
 int sendIntervalSec = 15;
 
 // ระบบ Fast Cache จำชนิดเซนเซอร์เพื่อให้อ่านเร็วสุด (<20ms) ไม่กระตุก
@@ -502,7 +496,6 @@ void readSensorAuto() {
   int dhtPins[] = {27, 22, 17, 32}; 
   for (int p = 0; p < 4; p++) {
     int pin = dhtPins[p];
-    if (pin == RELAY_PIN && fanState) continue;
     
     // ลองอ่านแบบ DHT22 / AM2301 (โพรบส่วนใหญ่เป็น AM2301)
     if (readDHTDirect(pin, true, t, h)) {
@@ -528,9 +521,6 @@ void readSensorAuto() {
   humi = 0.0;
 }
 
-void updateHardware() {
-  digitalWrite(RELAY_PIN, fanState ? HIGH : LOW);
-}
 
 // 1. แถบแสดงสถานะบนสุด (Status Bar)
 void drawHeaderStatus() {
@@ -635,18 +625,11 @@ void drawUI() {
   tft.setTextColor(TFT_YELLOW, COLOR_CARD_BG);
   tft.drawCentreString("[ CONFIG ]", 160, 202, 2);
 
-  uint16_t fanBtnColor = fanState ? tft.color565(16, 185, 129) : COLOR_CARD_BG;
-  tft.fillRoundRect(216, 190, 98, 42, 8, fanBtnColor);
-  tft.drawRoundRect(216, 190, 98, 42, 8, fanState ? TFT_GREEN : COLOR_CARD_LINE);
-  tft.setTextColor(TFT_WHITE, fanBtnColor);
-  tft.drawCentreString(fanState ? "[ FAN:ON ]" : "[ FAN:OFF ]", 265, 202, 2);
 }
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ป้องกัน Brownout Reset จากไฟ USB ตกขณะเปิด WiFi
   Serial.begin(115200);
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
 
   // 1. เปิดไฟ Backlight หน้าจอ CYD ESP32 (GPIO 21) ล็อคค้างไว้ ห้ามสั่งเปลี่ยนพิน
   pinMode(21, OUTPUT);
@@ -723,13 +706,8 @@ void loop() {
         lastSend = 0;
         drawStatusCard();
         delay(200);
-      } else if (screenX >= 105 && screenX < 210) {
+      } else if (screenX >= 105) {
         WiFiManager wm; wm.resetSettings(); ESP.restart();
-      } else if (screenX >= 210) {
-        fanState = !fanState;
-        updateHardware();
-        drawUI();
-        delay(300);
       }
     }
   }
@@ -759,12 +737,6 @@ void loop() {
           lastSyncOK = String(timeStr);
         }
         String res = http.getString();
-        if (res.indexOf("\"fanState\":true") >= 0) {
-          fanState = true;
-        } else if (res.indexOf("\"fanState\":false") >= 0) {
-          fanState = false;
-        }
-        updateHardware();
       }
       drawStatusCard();
       http.end();
@@ -801,7 +773,6 @@ const char* serverUrl = "${serverUrlEndpoint}";
 #define XPT2046_MISO  39
 #define XPT2046_CLK   25
 #define XPT2046_CS    33
-#define RELAY_PIN     22  // ขาควบคุม Relay พัดลม (หรือ Pin 4 LED)
 #define TFT_BL        21  // ขาควบคุมไฟหลังจอ Backlight CYD ESP32 (ห้ามใช้ต่อเซนเซอร์)
 
 SPIClass touchSpi = SPIClass(VSPI);
@@ -820,8 +791,6 @@ TFT_eSPI tft = TFT_eSPI();
 float temp = 0, humi = 0;
 bool isSensorError = true;
 int lastCloudCode = 0;
-bool fanState = false;
-bool autoFan = true;
 int sendIntervalSec = 15;
 float maxTemp = 30.0;
 float maxHum = 65.0;
@@ -998,7 +967,6 @@ void readSensorAuto() {
   int dhtPins[] = {27, 22, 17, 32}; 
   for (int p = 0; p < 4; p++) {
     int pin = dhtPins[p];
-    if (pin == RELAY_PIN && fanState) continue;
     
     // ลองอ่านแบบ DHT22 / AM2301 (โพรบส่วนใหญ่เป็น AM2301)
     if (readDHTDirect(pin, true, t, h)) {
@@ -1024,9 +992,6 @@ void readSensorAuto() {
   humi = 0.0;
 }
 
-void updateHardware() {
-  digitalWrite(RELAY_PIN, fanState ? HIGH : LOW);
-}
 
 // 1. แถบแสดงสถานะบนสุด (Status Bar)
 void drawHeaderStatus() {
@@ -1130,18 +1095,11 @@ void drawUI() {
   tft.setTextColor(TFT_YELLOW, COLOR_CARD_BG);
   tft.drawCentreString("[ CONFIG ]", 160, 202, 2);
 
-  uint16_t fanBtnColor = fanState ? tft.color565(16, 185, 129) : COLOR_CARD_BG;
-  tft.fillRoundRect(216, 190, 98, 42, 8, fanBtnColor);
-  tft.drawRoundRect(216, 190, 98, 42, 8, fanState ? TFT_GREEN : COLOR_CARD_LINE);
-  tft.setTextColor(TFT_WHITE, fanBtnColor);
-  tft.drawCentreString(fanState ? "[ FAN:ON ]" : "[ FAN:OFF ]", 265, 202, 2);
 }
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ป้องกัน Brownout Reset จากไฟ USB ตกขณะเปิด WiFi
   Serial.begin(115200);
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
 
   // 1. เปิดไฟ Backlight หน้าจอ CYD ESP32 (GPIO 21) ล็อคค้างไว้ ห้ามสั่งเปลี่ยนพิน
   pinMode(21, OUTPUT);
@@ -1218,13 +1176,8 @@ void loop() {
         lastSend = 0;
         drawStatusCard();
         delay(200);
-      } else if (screenX >= 105 && screenX < 210) {
+      } else if (screenX >= 105) {
         WiFiManager wm; wm.resetSettings(); ESP.restart();
-      } else if (screenX >= 210) {
-        fanState = !fanState;
-        updateHardware();
-        drawUI();
-        delay(300);
       }
     }
   }
@@ -1254,14 +1207,11 @@ void loop() {
         DeserializationError error = deserializeJson(docIn, response);
         if (!error && docIn.containsKey("config")) {
           JsonObject cfg = docIn["config"];
-          fanState = cfg["fanState"] | fanState;
-          autoFan = cfg["autoFan"] | autoFan;
           sendIntervalSec = cfg["sendIntervalSec"] | sendIntervalSec;
           maxTemp = cfg["maxTemp"] | maxTemp;
           maxHum = cfg["maxHum"] | maxHum;
 
-          updateHardware();
-        }
+          }
       }
       drawStatusCard();
       http.end();
@@ -1860,7 +1810,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                         <div>
                           <h3 className="font-bold text-red-900 text-base">รูป่าสุด: "Compilation error: 'tft' was not declared in this scope" แก้ยังไง?</h3>
                           <p className="text-xs text-red-700 mt-1">
-                            สาเหตุเกิดจากตอนคัดลอกโค้ดไปวางใน Arduino IDE <strong>คัดลอกมาไม่ครบทั้งไฟล์</strong> (ขาดส่วนประกาศตัวแปรบรรทัดบนสุด เช่น <code className="bg-red-100 text-red-900 px-1 rounded font-mono">TFT_eSPI tft = TFT_eSPI();</code> และ <code className="bg-red-100 text-red-900 px-1 rounded font-mono">bool fanState = false;</code> ไปครับ)
+                            สาเหตุเกิดจากตอนคัดลอกโค้ดไปวางใน Arduino IDE <strong>คัดลอกมาไม่ครบทั้งไฟล์</strong> (ขาดส่วนประกาศตัวแปรบรรทัดบนสุด เช่น <code className="bg-red-100 text-red-900 px-1 rounded font-mono">TFT_eSPI tft = TFT_eSPI();</code> ไปครับ)
                           </p>
                         </div>
                       </div>
@@ -1890,21 +1840,21 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                         <p className="font-bold text-slate-800">✅ วิธีแก้ไขมี 2 ทางเลือกง่ายๆ ครับ:</p>
                         <ol className="list-decimal list-inside space-y-2 text-slate-600 leading-relaxed">
                           <li>
-                            <strong>ทางเลือก A (แนะนำเร็วที่สุด):</strong> เลือกกดแท็บด้านบนแท็บที่ 2 <span className="text-blue-600 font-bold">"2. โค้ดแบบไม่ใช้ Library"</span> แล้วคัดลอกโค้ดไปวางใน Arduino IDE ได้เลย <u>สามารถกด Compile และ Upload ผ่านได้ทันที 100% ไม่ติด Error ใดๆ ครับ!</u>
+                            <strong>ทางเลือก A (แนะนำเร็วที่สุด):</strong> เลือกกดแท็บด้านบนแท็บ <strong>"2. โค้ดแบบไม่ใช้ Library"</strong> แล้วคัดลอกโค้ดไปวางทับใหม่ให้ครบถ้วนครับ
                           </li>
                           <li>
-                            <strong>ทางเลือก B (ติดตั้ง Library):</strong> ใน Arduino IDE ให้คลิกไอคอนหนังสือทางซ้ายมือ <strong>(Library Manager)</strong> พิมพ์ช่องค้นหาคำว่า <code className="bg-slate-100 text-red-600 px-1 py-0.5 rounded font-mono">ArduinoJson</code> โดยผู้พัฒนา Benoit Blanchon แล้วกดปุ่ม <strong>INSTALL</strong>
+                            <strong>ทางเลือก B:</strong> หากต้องการใช้แท็บ 3 คุณต้องไปที่เมนู <strong>Sketch {'>'} Include Library {'>'} Manage Libraries...</strong> ค้นหา <strong>"ArduinoJson"</strong> แล้วกด Install (เวอร์ชัน 7.x) ให้เรียบร้อยก่อนกด Upload ครับ
                           </li>
                         </ol>
                       </div>
                     </div>
 
-                    {/* Fix Error 3: string literal operator error */}
+                    {/* Fix Error 2: String Literal Error */}
                     <div className="bg-orange-50 border border-orange-200 rounded-xl p-5 space-y-3">
                       <div className="flex items-start gap-3">
                         <AlertCircle className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
                         <div>
-                          <h3 className="font-bold text-orange-900 text-base">รูปที่ 3: "unable to find string literal operator 'operator""temperature'" หมายถึงอะไร?</h3>
+                          <h3 className="font-bold text-orange-900 text-base">Error: "unable to find string literal operator" หมายถึงอะไร?</h3>
                           <p className="text-xs text-orange-700 mt-1">
                             แปลว่าในโค้ด C++ มีการใส่เครื่องหมายอัญประกาศ <code className="bg-orange-100 text-orange-900 px-1 rounded font-mono">"..."</code> ซ้อนกันผิดรูปแบบในการต่อข้อความ String ครับ
                           </p>
@@ -2170,60 +2120,16 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
         {/* Sidebar */}
         <aside className="w-80 flex flex-col gap-6 h-full shrink-0 overflow-y-auto hidden md:flex">
           
-          {/* Remote Hardware Control Card */}
+          {/* Interval Setting */}
           <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm shrink-0 space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                <Power className="w-4 h-4 text-blue-600" /> สั่งการอุปกรณ์ (Remote Control)
+                <Clock className="w-4 h-4 text-blue-600" /> ตั้งค่าระบบ (Settings)
               </h2>
               {isUpdatingConfig && <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" />}
             </div>
-
-            {/* Fan / Cooler Switch */}
-            <div className={`p-4 rounded-xl border transition-all ${
-              settings.fanState ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'
-            }`}>
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <div className={`p-2 rounded-lg ${settings.fanState ? 'bg-emerald-600 text-white' : 'bg-slate-300 text-slate-600'}`}>
-                    <Power className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-slate-800">พัดลม / Cooler (Relay Pin 22)</p>
-                    <p className="text-[10px] text-slate-500">{settings.fanState ? 'กำลังทำงาน (ACTIVE)' : 'ปิดการทำงาน (OFF)'}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between pt-2 border-t border-slate-200/60 mt-2">
-                <span className="text-xs text-slate-600 font-medium">โหมดคำสั่ง</span>
-                <button
-                  onClick={() => updateDeviceConfig({ fanState: !settings.fanState })}
-                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                    settings.fanState ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-slate-800 text-white hover:bg-slate-700'
-                  }`}
-                >
-                  {settings.fanState ? 'สวิตช์: กดเพื่อสั่งปิด' : 'สวิตช์: กดเพื่อสั่งเปิด'}
-                </button>
-              </div>
-
-              <div className="flex items-center justify-between mt-3 text-xs">
-                <span className="text-slate-500">ควบคุมอุณหภูมิอัตโนมัติ (Auto Fan)</span>
-                <input 
-                  type="checkbox" 
-                  checked={settings.autoFan} 
-                  onChange={(e) => updateDeviceConfig({ autoFan: e.target.checked })}
-                  className="w-4 h-4 accent-blue-600 cursor-pointer"
-                />
-              </div>
-            </div>
-
-            {/* Interval Setting */}
             <div className="p-3 bg-blue-50/50 rounded-xl border border-blue-100 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4 text-blue-600" />
-                <span className="text-xs font-semibold text-slate-700">รอบการส่งข้อมูล</span>
-              </div>
+              <span className="text-xs font-semibold text-slate-700">รอบการส่งข้อมูล</span>
               <select 
                 value={settings.sendIntervalSec}
                 onChange={(e) => updateDeviceConfig({ sendIntervalSec: Number(e.target.value) })}
@@ -2341,20 +2247,6 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
               </button>
             </div>
 
-            {/* Mobile Remote Fan Toggle */}
-            <div className="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl border border-slate-200">
-              <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                <Power className="w-3.5 h-3.5 text-blue-600" /> พัดลม/Cooler: {settings.fanState ? 'ON' : 'OFF'}
-              </span>
-              <button
-                onClick={() => updateDeviceConfig({ fanState: !settings.fanState })}
-                className={`px-3 py-1 rounded-lg text-xs font-bold text-white transition-all cursor-pointer ${
-                  settings.fanState ? 'bg-emerald-600' : 'bg-slate-800'
-                }`}
-              >
-                {settings.fanState ? 'สั่งปิด' : 'สั่งเปิด'}
-              </button>
-            </div>
           </div>
 
           {/* Temperature Chart */}
