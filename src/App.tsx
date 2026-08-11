@@ -4,11 +4,11 @@ import {
 } from 'recharts';
 import { 
   Thermometer, Droplets, Settings, Activity, AlertTriangle, Cpu, Download, 
-  Copy, Check, Code, Wifi, WifiOff, AlertCircle, Info, RefreshCw, Power, Zap, Clock, ShieldCheck, CheckCircle2 
+  Copy, Check, Code, Wifi, WifiOff, AlertCircle, Info, RefreshCw, Power, Zap, Clock, ShieldCheck, CheckCircle2, Trash2 
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, query, orderBy, limit, onSnapshot, setDoc } from 'firebase/firestore';
+import { getFirestore, collection, doc, query, orderBy, limit, onSnapshot, setDoc, getDocs } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 // Initialize Firebase
@@ -27,6 +27,8 @@ interface DeviceSettings {
   maxTemp: number;
   maxHum: number;
   sendIntervalSec: number;
+  tempOffset?: number;
+  humOffset?: number;
   fanState: boolean;
   autoFan: boolean;
   updatedAt?: number;
@@ -43,13 +45,61 @@ export default function App() {
   const [settings, setSettings] = useState<DeviceSettings>({
     maxTemp: 30,
     maxHum: 65,
-    sendIntervalSec: 15,
+    sendIntervalSec: 60,
+    tempOffset: 0,
+    humOffset: 0,
     fanState: false,
     autoFan: true,
   });
 
   const [showSettings, setShowSettings] = useState(false);
   const [lastPacketReceivedClientTime, setLastPacketReceivedClientTime] = useState<number>(Date.now());
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshToast, setRefreshToast] = useState<string | null>(null);
+
+  // Manual Instant Refresh Handler
+  const handleRefreshData = async () => {
+    setIsRefreshing(true);
+    try {
+      const q = query(
+        collection(db, 'sensor_data'),
+        orderBy('timestamp', 'desc'),
+        limit(1000)
+      );
+      const snapshot = await getDocs(q);
+      const sensorReadings = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      } as SensorData));
+      sensorReadings.sort((a, b) => a.timestamp - b.timestamp);
+      setData(sensorReadings);
+      setLastPacketReceivedClientTime(Date.now());
+      setRefreshToast('ดึงข้อมูลล่าสุดเรียบร้อยแล้ว');
+      setTimeout(() => setRefreshToast(null), 3000);
+    } catch (err) {
+      console.error("Error refreshing sensor data:", err);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const [isClearingData, setIsClearingData] = useState(false);
+  const handleClearHistory = async () => {
+    if (!window.confirm('คุณต้องการล้างประวัติข้อมูลเก่าในระบบเพื่อตั้งต้นใหม่ใช่หรือไม่?')) return;
+    setIsClearingData(true);
+    try {
+      const res = await fetch('/api/clear-sensor-data', { method: 'POST' });
+      if (res.ok) {
+        setData([]);
+        setRefreshToast('ล้างประวัติข้อมูลเรียบร้อยแล้ว');
+        setTimeout(() => setRefreshToast(null), 3000);
+      }
+    } catch (err) {
+      console.error('Failed to clear sensor data history:', err);
+    } finally {
+      setIsClearingData(false);
+    }
+  };
 
   // 1. Fetch real-time sensor data from Firestore
   useEffect(() => {
@@ -110,30 +160,6 @@ export default function App() {
     }
   };
 
-  const [isSendingTest, setIsSendingTest] = useState(false);
-
-  const sendTestPacket = async (customTemp?: number, customHum?: number) => {
-    setIsSendingTest(true);
-    const mockTemp = customTemp ?? Number((28.5 + (Math.random() * 4 - 2)).toFixed(1));
-    const mockHum = customHum ?? Number((60 + (Math.random() * 6 - 3)).toFixed(1));
-
-    try {
-      await fetch('/api/sensor-data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          temperature: mockTemp,
-          humidity: mockHum,
-          sensor_error: false,
-        }),
-      });
-    } catch (err) {
-      console.error('Failed to send test packet:', err);
-    } finally {
-      setIsSendingTest(false);
-    }
-  };
-
   const exportToCSV = () => {
     if (data.length === 0) return;
     
@@ -143,12 +169,14 @@ export default function App() {
     data.forEach(row => {
       const date = new Date(row.timestamp);
       const isErr = row.sensor_error || (row.temperature === 0 && row.humidity === 0);
+      const calTemp = isErr ? 0 : Number((row.temperature + (settings.tempOffset || 0)).toFixed(1));
+      const calHum = isErr ? 0 : Number((row.humidity + (settings.humOffset || 0)).toFixed(1));
       const rowData = [
         row.timestamp,
         format(date, 'yyyy-MM-dd'),
         format(date, 'HH:mm:ss'),
-        row.temperature,
-        row.humidity,
+        calTemp,
+        calHum,
         isErr ? 'SENSOR_FAULT' : 'OK'
       ];
       csvRows.push(rowData.join(','));
@@ -177,15 +205,34 @@ export default function App() {
     return data.filter(d => d.timestamp >= cutoff);
   }, [data, timeRange]);
 
-  // Format data for Recharts
+  // Format data for Recharts with calibration offsets applied
   const chartData = useMemo(() => {
-    return filteredData.map(d => ({
-      ...d,
-      timeLabel: format(new Date(d.timestamp), timeRange === '1H' ? 'HH:mm' : 'MMM dd, HH:mm'),
-    }));
-  }, [filteredData, timeRange]);
+    return filteredData.map(d => {
+      const isErr = Boolean(d.sensor_error) || (d.temperature === 0 && d.humidity === 0);
+      const calibratedTemp = isErr ? 0 : Number((d.temperature + (settings.tempOffset || 0)).toFixed(1));
+      const calibratedHum = isErr ? 0 : Number((d.humidity + (settings.humOffset || 0)).toFixed(1));
+      return {
+        ...d,
+        temperature: calibratedTemp,
+        humidity: calibratedHum,
+        timeLabel: format(new Date(d.timestamp), timeRange === '1H' ? 'HH:mm' : 'MMM dd, HH:mm'),
+      };
+    });
+  }, [filteredData, timeRange, settings.tempOffset, settings.humOffset]);
 
-  const latestData = data.length > 0 ? data[data.length - 1] : null;
+  const rawLatestData = data.length > 0 ? data[data.length - 1] : null;
+
+  // Calibrated latest sensor reading
+  const latestData = useMemo(() => {
+    if (!rawLatestData) return null;
+    const isErr = Boolean(rawLatestData.sensor_error) || (rawLatestData.temperature === 0 && rawLatestData.humidity === 0);
+    if (isErr) return rawLatestData;
+    return {
+      ...rawLatestData,
+      temperature: Number((rawLatestData.temperature + (settings.tempOffset || 0)).toFixed(1)),
+      humidity: Number((rawLatestData.humidity + (settings.humOffset || 0)).toFixed(1)),
+    };
+  }, [rawLatestData, settings.tempOffset, settings.humOffset]);
 
   // Connection State
   const connectionState = useMemo(() => {
@@ -1226,25 +1273,33 @@ void loop() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#F1F5F9] font-sans text-slate-900 overflow-hidden">
+    <div className="flex flex-col h-screen bg-[#F1F5F9] font-sans text-slate-900 overflow-hidden relative">
+      {/* Toast Alert */}
+      {refreshToast && (
+        <div className="fixed top-18 right-6 z-50 bg-emerald-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl shadow-xl border border-emerald-500 flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+          <span>{refreshToast}</span>
+        </div>
+      )}
+
       {/* Navbar */}
       <nav className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 sm:px-8 shrink-0 shadow-sm z-10">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
             <Activity className="w-5 h-5 text-white" />
           </div>
-          <h1 className="text-lg sm:text-xl font-bold tracking-tight">SensorFlow <span className="text-blue-600">2-Way Cloud</span></h1>
+          <h1 className="text-lg sm:text-xl font-bold tracking-tight">SensorFlow <span className="text-blue-600">Realtime Cloud</span></h1>
         </div>
         
         <div className="flex items-center gap-2 sm:gap-4">
           <button 
-            onClick={() => sendTestPacket()}
-            disabled={isSendingTest}
-            title="ทดสอบส่งข้อมูล Sensor เข้า Cloud"
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors cursor-pointer"
+            onClick={handleRefreshData}
+            disabled={isRefreshing}
+            title="ดึงข้อมูลล่าสุดจาก Cloud ทันที"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-bold text-emerald-700 bg-emerald-50 border border-emerald-300 rounded-lg hover:bg-emerald-100 transition-colors cursor-pointer shadow-sm disabled:opacity-50"
           >
-            <RefreshCw className={`w-4 h-4 text-emerald-600 ${isSendingTest ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline">⚡ ทดสอบ Sync Cloud</span>
+            <RefreshCw className={`w-4 h-4 text-emerald-600 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>{isRefreshing ? 'กำลังดึงข้อมูล...' : 'ดึงข้อมูลล่าสุด (Refresh)'}</span>
           </button>
 
           <button 
@@ -2001,7 +2056,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-lg font-semibold flex items-center gap-2">
                   <Settings className="w-5 h-5 text-slate-500" />
-                  ตั้งค่าเกณฑ์การแจ้งเตือน & ความถี่ Sync
+                  ตั้งค่าเกณฑ์การแจ้งเตือน & สอบเทียบ (Calibration)
                 </h2>
                 <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600 w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100">
                   ✕
@@ -2012,7 +2067,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      อุณหภูมิสูงสุด (°C)
+                      อุณหภูมิสูงสุด แจ้งเตือน (°C)
                     </label>
                     <input 
                       type="number" 
@@ -2023,7 +2078,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      ความชื้นสูงสุด (%)
+                      ความชื้นสูงสุด แจ้งเตือน (%)
                     </label>
                     <input 
                       type="number" 
@@ -2036,28 +2091,73 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    ความถี่ส่งข้อมูลจาก ESP32 (Interval Sec)
+                    ความถี่ส่งข้อมูลจาก ESP32 (Interval)
                   </label>
                   <select 
                     value={settings.sendIntervalSec}
                     onChange={(e) => updateDeviceConfig({ sendIntervalSec: Number(e.target.value) })}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
                   >
-                    <option value={5}>5 วินาที (เรียลไทม์ / Fast)</option>
-                    <option value={15}>15 วินาที (มาตรฐาน / Balanced)</option>
-                    <option value={30}>30 วินาที (ประหยัดพลังงาน / Power Save)</option>
-                    <option value={60}>60 วินาที (1 นาที / Low Bandwidth)</option>
+                    <option value={10}>10 วินาที (เร็วมาก / High Traffic)</option>
+                    <option value={30}>30 วินาที (เรียลไทม์ / Fast)</option>
+                    <option value={60}>60 วินาที (1 นาที / มาตรฐานแนะนำ)</option>
+                    <option value={120}>120 วินาที (2 นาที / Eco Mode)</option>
+                    <option value={300}>300 วินาที (5 นาที / Low Bandwidth)</option>
                   </select>
+                </div>
+
+                {/* Calibration Offsets section */}
+                <div className="pt-3 border-t border-slate-100 space-y-2">
+                  <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <Thermometer className="w-4 h-4 text-blue-600" /> ปรับชดเชยค่าเซ็นเซอร์ให้ตรงกับเครื่องมือวัด (Calibration Offset)
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    ใส่ค่าบวก/ลบ เพื่อปรับแต่งให้ตัวเลขอุณหภูมิและความชื้นตรงกับเครื่องมือวัดมาตรฐานของคุณ 100%
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        ชดเชยอุณหภูมิ (°C)
+                      </label>
+                      <input 
+                        type="number" 
+                        step="0.1"
+                        value={settings.tempOffset || 0}
+                        onChange={(e) => updateDeviceConfig({ tempOffset: Number(e.target.value) })}
+                        placeholder="เช่น -1.0 หรือ +0.5"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        ชดเชยความชื้น (%)
+                      </label>
+                      <input 
+                        type="number" 
+                        step="0.5"
+                        value={settings.humOffset || 0}
+                        onChange={(e) => updateDeviceConfig({ humOffset: Number(e.target.value) })}
+                        placeholder="เช่น -5 หรือ +2"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm font-mono"
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
               
-              <div className="mt-6 pt-6 border-t border-slate-200">
-                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-emerald-600" /> เชื่อมโยงกับ Firestore Cloud
-                </h3>
-                <p className="text-xs text-slate-600">
-                  ค่าที่คุณปรับแต่งตรงนี้ จะซิงก์เข้า Firestore คอลเลกชัน <code className="bg-slate-100 px-1 py-0.5 rounded text-blue-600 font-mono">device_settings/config</code> และส่งคำสั่งตรงไปที่ ESP32 บอร์ดจริงโดยอัตโนมัติ
-                </p>
+              <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-bold text-slate-700">ล้างประวัติข้อมูลเก่า</p>
+                  <p className="text-[11px] text-slate-500">ลบข้อมูลทดสอบใน Firestore เพื่อเริ่มนับใหม่</p>
+                </div>
+                <button
+                  onClick={handleClearHistory}
+                  disabled={isClearingData}
+                  className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isClearingData ? 'กำลังล้าง...' : 'ล้างประวัติเก่า'}</span>
+                </button>
               </div>
             </div>
           </div>
@@ -2125,34 +2225,11 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                 onChange={(e) => updateDeviceConfig({ sendIntervalSec: Number(e.target.value) })}
                 className="text-xs font-bold text-blue-700 bg-white border border-blue-200 px-2 py-1 rounded-md outline-none cursor-pointer"
               >
-                <option value={5}>ทุก 5s</option>
-                <option value={15}>ทุก 15s</option>
                 <option value={30}>ทุก 30s</option>
-                <option value={60}>ทุก 60s</option>
+                <option value={60}>ทุก 1 นาที</option>
+                <option value={120}>ทุก 2 นาที</option>
+                <option value={300}>ทุก 5 นาที</option>
               </select>
-            </div>
-
-            {/* Cloud Data Test & Simulation Panel */}
-            <div className="p-3 bg-emerald-50/60 rounded-xl border border-emerald-200 space-y-2">
-              <p className="text-xs font-bold text-emerald-900 flex items-center gap-1.5">
-                <Zap className="w-3.5 h-3.5 text-emerald-600" /> ทดสอบระบบ Cloud Sync แบบเร่งด่วน:
-              </p>
-              <div className="grid grid-cols-2 gap-1.5">
-                <button
-                  onClick={() => sendTestPacket(28.5, 62.0)}
-                  disabled={isSendingTest}
-                  className="px-2 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold transition-all cursor-pointer shadow-sm disabled:opacity-50"
-                >
-                  🟢 ปกติ 28.5°C
-                </button>
-                <button
-                  onClick={() => sendTestPacket(58.0, 35.0)}
-                  disabled={isSendingTest}
-                  className="px-2 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[11px] font-bold transition-all cursor-pointer shadow-sm disabled:opacity-50"
-                >
-                  🔥 ความร้อน 58°C
-                </button>
-              </div>
             </div>
           </div>
 

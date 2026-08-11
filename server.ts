@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, query, limit } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit } from 'firebase/firestore';
 import fs from 'fs';
 
 const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf8'));
@@ -20,6 +20,8 @@ interface DeviceSettings {
   maxTemp: number;
   maxHum: number;
   sendIntervalSec: number;
+  tempOffset?: number;
+  humOffset?: number;
   fanState: boolean;
   autoFan: boolean;
   updatedAt: number;
@@ -28,7 +30,9 @@ interface DeviceSettings {
 let activeSettings: DeviceSettings = {
   maxTemp: 30,
   maxHum: 65,
-  sendIntervalSec: 15,
+  sendIntervalSec: 60,
+  tempOffset: 0,
+  humOffset: 0,
   fanState: false,
   autoFan: true,
   updatedAt: Date.now(),
@@ -50,33 +54,6 @@ const loadSettings = async () => {
 };
 loadSettings();
 
-// Optionally seed initial data if empty
-const seedData = async () => {
-  try {
-    const q = query(collection(db, 'sensor_data'), limit(1));
-    const snapshot = await getDocs(q);
-    if (snapshot.empty) {
-      console.log('Seeding initial data to Firestore...');
-      const now = Date.now();
-      let baseTemp = 25;
-      let baseHum = 50;
-      for (let i = 60; i >= 0; i--) {
-        baseTemp = baseTemp + (Math.random() - 0.5) * 1.5;
-        baseHum = baseHum + (Math.random() - 0.5) * 3;
-        await addDoc(collection(db, 'sensor_data'), {
-          timestamp: now - i * 60000,
-          temperature: Number(baseTemp.toFixed(1)),
-          humidity: Number(baseHum.toFixed(1)),
-        });
-      }
-      console.log('Seeding complete.');
-    }
-  } catch (err) {
-    console.error('Error seeding data:', err);
-  }
-};
-seedData();
-
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -90,11 +67,13 @@ async function startServer() {
 
   // API Route: Update device settings (from Web App)
   app.post('/api/device-config', async (req, res) => {
-    const { maxTemp, maxHum, sendIntervalSec, fanState, autoFan } = req.body;
+    const { maxTemp, maxHum, sendIntervalSec, tempOffset, humOffset, fanState, autoFan } = req.body;
     
     if (maxTemp != null) activeSettings.maxTemp = Number(maxTemp);
     if (maxHum != null) activeSettings.maxHum = Number(maxHum);
     if (sendIntervalSec != null) activeSettings.sendIntervalSec = Number(sendIntervalSec);
+    if (tempOffset != null) activeSettings.tempOffset = Number(tempOffset);
+    if (humOffset != null) activeSettings.humOffset = Number(humOffset);
     if (fanState != null) activeSettings.fanState = Boolean(fanState);
     if (autoFan != null) activeSettings.autoFan = Boolean(autoFan);
     activeSettings.updatedAt = Date.now();
@@ -105,6 +84,20 @@ async function startServer() {
     } catch (err) {
       console.error('Error updating settings in Firestore:', err);
       res.status(500).json({ error: 'Failed to update settings' });
+    }
+  });
+
+  // API Route: Clear old test sensor data from database
+  app.post('/api/clear-sensor-data', async (req, res) => {
+    try {
+      const q = query(collection(db, 'sensor_data'), limit(500));
+      const snapshot = await getDocs(q);
+      const deletePromises = snapshot.docs.map(docSnap => deleteDoc(doc(db, 'sensor_data', docSnap.id)));
+      await Promise.all(deletePromises);
+      res.json({ success: true, count: snapshot.docs.length });
+    } catch (err) {
+      console.error('Error clearing data:', err);
+      res.status(500).json({ error: 'Failed to clear data' });
     }
   });
 
