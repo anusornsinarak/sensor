@@ -653,11 +653,20 @@ void setup() {
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   
   if (strlen(WIFI_SSID) > 0) {
+    Serial.print("Connecting to WiFi: ");
+    Serial.println(WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     int retry = 0;
     while (WiFi.status() != WL_CONNECTED && retry < 30) {
       delay(500);
+      Serial.print(".");
       retry++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\\nWiFi Connected!");
+      Serial.print("IP: "); Serial.println(WiFi.localIP());
+    } else {
+      Serial.println("\\nWiFi Connect Failed.");
     }
   } else {
     WiFiManager wm;
@@ -728,7 +737,12 @@ void loop() {
       json += "\\\"sensor_error\\\":" + String(isSensorError ? "true" : "false");
       json += "}";
 
+      Serial.println("Sending Data to Cloud...");
+      Serial.println(json);
       lastCloudCode = http.POST(json);
+      Serial.print("HTTP Response Code: ");
+      Serial.println(lastCloudCode);
+      
       if (lastCloudCode == 200) {
         struct tm timeinfo;
         if (getLocalTime(&timeinfo)) {
@@ -737,6 +751,9 @@ void loop() {
           lastSyncOK = String(timeStr);
         }
         String res = http.getString();
+      } else {
+        Serial.print("Error Payload: ");
+        Serial.println(http.getString());
       }
       drawStatusCard();
       http.end();
