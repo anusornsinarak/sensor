@@ -332,5 +332,18 @@ async function startServer() {
 }
 
 // For local/Cloud Run development
-const appPromise = startServer();
-export default appPromise;
+let appInstance: express.Express | null = null;
+startServer().then(app => {
+  appInstance = app;
+}).catch(console.error);
+
+export default (req: any, res: any) => {
+  if (appInstance) {
+    appInstance(req, res);
+  } else {
+    startServer().then(app => {
+      appInstance = app;
+      appInstance(req, res);
+    });
+  }
+};
