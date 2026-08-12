@@ -2,8 +2,9 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit, onSnapshot, where, orderBy } from 'firebase/firestore';
 import fs from 'fs';
+import axios from 'axios';
 
 const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf8'));
 const firebaseApp = initializeApp(firebaseConfig);
@@ -22,6 +23,9 @@ interface DeviceSettings {
   sendIntervalSec: number;
   tempOffset?: number;
   humOffset?: number;
+  lineToken?: string;
+  lineUserId?: string;
+  lineNotifyEnabled?: boolean;
   updatedAt: number;
 }
 
@@ -31,8 +35,15 @@ let activeSettings: DeviceSettings = {
   sendIntervalSec: 60,
   tempOffset: 0,
   humOffset: 0,
+  lineToken: '',
+  lineUserId: '',
+  lineNotifyEnabled: false,
   updatedAt: Date.now(),
 };
+
+// Line Alert State to prevent spam
+let lastAlertTime = 0;
+const ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown
 
 // Sync settings with Firestore on start
 const loadSettings = async () => {
@@ -50,6 +61,56 @@ const loadSettings = async () => {
 };
 loadSettings();
 
+// Listen to Firestore for new sensor_data to trigger LINE Alerts
+const serverStartTime = Date.now();
+const sensorDataRef = collection(db, 'sensor_data');
+const qNewData = query(sensorDataRef, where('timestamp', '>', serverStartTime));
+
+onSnapshot(qNewData, (snapshot) => {
+  snapshot.docChanges().forEach((change) => {
+    if (change.type === 'added') {
+      const data = change.doc.data() as SensorData;
+      checkAndSendAlert(data);
+    }
+  });
+});
+
+async function checkAndSendAlert(data: SensorData) {
+  if (!activeSettings.lineNotifyEnabled || !activeSettings.lineToken || !activeSettings.lineUserId) return;
+  
+  const now = Date.now();
+  if (now - lastAlertTime < ALERT_COOLDOWN_MS) return; // Prevent spam
+
+  const isErr = data.sensor_error || (data.temperature === 0 && data.humidity === 0);
+  let alertMessage = '';
+
+  if (isErr) {
+    alertMessage = '⚠️ [แจ้งเตือน] เซนเซอร์มีปัญหา (Sensor Error)\n💡 คำแนะนำ: กรุณาตรวจสอบสายเชื่อมต่อ หรือรีสตาร์ทอุปกรณ์ครับ';
+  } else if (data.temperature > activeSettings.maxTemp) {
+    alertMessage = `🔥 [แจ้งเตือน] อุณหภูมิสูงเกินกำหนด!\n🌡️ อุณหภูมิปัจจุบัน: ${data.temperature.toFixed(1)}°C (ตั้งไว้: ${activeSettings.maxTemp}°C)\n💡 คำแนะนำ: ควรเปิดพัดลมระบายอากาศ, เปิดเครื่องปรับอากาศ หรือเปิดหน้าต่างเพื่อลดอุณหภูมิครับ`;
+  } else if (data.humidity > activeSettings.maxHum) {
+    alertMessage = `💧 [แจ้งเตือน] ความชื้นสูงเกินกำหนด!\n💦 ความชื้นปัจจุบัน: ${data.humidity.toFixed(1)}% (ตั้งไว้: ${activeSettings.maxHum}%)\n💡 คำแนะนำ: ควรเปิดพัดลมดูดอากาศ หรือใช้เครื่องดูดความชื้น เพื่อป้องกันเชื้อราครับ`;
+  }
+
+  if (alertMessage) {
+    try {
+      await axios.post('https://api.line.me/v2/bot/message/push', {
+        to: activeSettings.lineUserId,
+        messages: [{ type: 'text', text: alertMessage }]
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${activeSettings.lineToken}`
+        }
+      });
+      console.log('Sent LINE OA Alert:', alertMessage);
+      lastAlertTime = now;
+    } catch (err) {
+      console.error('Failed to send LINE OA alert:', err);
+    }
+  }
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -63,15 +124,103 @@ async function startServer() {
     res.json(activeSettings);
   });
 
+  // API Route: LINE Webhook (Auto-capture Group ID)
+  app.post('/api/line-webhook', async (req, res) => {
+    res.status(200).send('OK'); // Always respond 200 OK to LINE immediately
+    
+    let body = req.body;
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch(e) {}
+    }
+    
+    if (body.events && Array.isArray(body.events)) {
+      for (const event of body.events) {
+        // Auto-save the Group ID if added to a group
+        if (event.source && event.source.type === 'group' && event.source.groupId) {
+          const groupId = event.source.groupId;
+          
+          if (activeSettings.lineUserId !== groupId) {
+            activeSettings.lineUserId = groupId;
+            activeSettings.updatedAt = Date.now();
+            
+            try {
+              await setDoc(doc(db, 'config', 'settings'), activeSettings, { merge: true });
+              console.log('Successfully auto-captured LINE Group ID:', groupId);
+              
+              if (activeSettings.lineToken) {
+                await axios.post('https://api.line.me/v2/bot/message/push', {
+                  to: groupId,
+                  messages: [{ type: 'text', text: '🟢 สวัสดีครับ! ระบบ Dashboard เชื่อมต่อกับกลุ่มนี้สำเร็จแล้ว\n\nระบบจะส่งการแจ้งเตือนค่าเซนเซอร์ที่นี่ครับ 📊' }]
+                }, {
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${activeSettings.lineToken}`
+                  }
+                });
+              }
+            } catch (err) {
+              console.error('Error saving or replying to LINE Group:', err);
+            }
+          }
+        }
+
+        // Handle text messages for "check" command
+        if (event.type === 'message' && event.message && event.message.type === 'text') {
+          const msgText = event.message.text.trim().toLowerCase();
+          if (msgText === 'check') {
+            try {
+              // Fetch latest sensor data
+              const qLatest = query(collection(db, 'sensor_data'), orderBy('timestamp', 'desc'), limit(1));
+              const snap = await getDocs(qLatest);
+              
+              let replyText = '';
+              if (!snap.empty) {
+                const latestData = snap.docs[0].data() as SensorData;
+                const isErr = latestData.sensor_error || (latestData.temperature === 0 && latestData.humidity === 0);
+                
+                if (isErr) {
+                  replyText = '⚠️ สถานะปัจจุบัน: เซนเซอร์มีปัญหา (Sensor Error)\n💡 คำแนะนำ: กรุณาตรวจสอบสายเชื่อมต่อ หรือรีสตาร์ทอุปกรณ์ครับ';
+                } else {
+                  replyText = `📊 สถานะปัจจุบัน:\n🌡️ อุณหภูมิ: ${latestData.temperature.toFixed(1)}°C\n💦 ความชื้น: ${latestData.humidity.toFixed(1)}%`;
+                }
+              } else {
+                replyText = '❌ ยังไม่มีข้อมูลเซนเซอร์ในระบบครับ';
+              }
+
+              // Reply back using the replyToken
+              if (activeSettings.lineToken && event.replyToken) {
+                await axios.post('https://api.line.me/v2/bot/message/reply', {
+                  replyToken: event.replyToken,
+                  messages: [{ type: 'text', text: replyText }]
+                }, {
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${activeSettings.lineToken}`
+                  }
+                });
+              }
+            } catch (err) {
+              console.error('Error replying to check command:', err);
+            }
+          }
+        }
+      }
+    }
+  });
+
   // API Route: Update device settings (from Web App)
   app.post('/api/device-config', async (req, res) => {
-    const { maxTemp, maxHum, sendIntervalSec, tempOffset, humOffset } = req.body;
+    const { maxTemp, maxHum, sendIntervalSec, tempOffset, humOffset, lineToken, lineUserId, lineNotifyEnabled } = req.body;
     
     if (maxTemp != null) activeSettings.maxTemp = Number(maxTemp);
     if (maxHum != null) activeSettings.maxHum = Number(maxHum);
     if (sendIntervalSec != null) activeSettings.sendIntervalSec = Number(sendIntervalSec);
     if (tempOffset != null) activeSettings.tempOffset = Number(tempOffset);
     if (humOffset != null) activeSettings.humOffset = Number(humOffset);
+    if (lineToken !== undefined) activeSettings.lineToken = lineToken;
+    if (lineUserId !== undefined) activeSettings.lineUserId = lineUserId;
+    if (lineNotifyEnabled !== undefined) activeSettings.lineNotifyEnabled = Boolean(lineNotifyEnabled);
+    
     activeSettings.updatedAt = Date.now();
 
     try {

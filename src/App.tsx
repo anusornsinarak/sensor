@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, query, orderBy, limit, onSnapshot, setDoc, getDocs } from 'firebase/firestore';
+import { getFirestore, collection, doc, query, orderBy, limit, onSnapshot, setDoc, getDocs, where } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 // Initialize Firebase
@@ -29,12 +29,19 @@ interface DeviceSettings {
   sendIntervalSec: number;
   tempOffset?: number;
   humOffset?: number;
+  lineToken?: string;
+  lineUserId?: string;
+  lineNotifyEnabled?: boolean;
   updatedAt?: number;
 }
 
 export default function App() {
   const [data, setData] = useState<SensorData[]>([]);
-  const [timeRange, setTimeRange] = useState<'1H' | '24H' | '7D'>('1H');
+  const [timeRange, setTimeRange] = useState<'1H' | '24H' | '7D' | 'CUSTOM'>('1H');
+  const [customStart, setCustomStart] = useState<string>('');
+  const [customEnd, setCustomEnd] = useState<string>('');
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [isUpdatingConfig, setIsUpdatingConfig] = useState(false);
@@ -46,6 +53,9 @@ export default function App() {
     sendIntervalSec: 60,
     tempOffset: 0,
     humOffset: 0,
+    lineToken: '',
+    lineUserId: '',
+    lineNotifyEnabled: false,
   });
 
   const [showSettings, setShowSettings] = useState(false);
@@ -158,13 +168,16 @@ export default function App() {
     }
   };
 
-  const exportToCSV = () => {
-    if (data.length === 0) return;
+  const processAndDownloadCSV = (exportData: SensorData[]) => {
+    if (exportData.length === 0) {
+      alert('ไม่มีข้อมูลในช่วงเวลาที่เลือก');
+      return;
+    }
     
     const headers = ['Timestamp', 'Date', 'Time', 'Temperature (°C)', 'Humidity (%)', 'Status'];
     const csvRows = [headers.join(',')];
     
-    data.forEach(row => {
+    exportData.forEach(row => {
       const date = new Date(row.timestamp);
       const isErr = row.sensor_error || (row.temperature === 0 && row.humidity === 0);
       const calTemp = isErr ? 0 : Number((row.temperature + (settings.tempOffset || 0)).toFixed(1));
@@ -180,7 +193,8 @@ export default function App() {
       csvRows.push(rowData.join(','));
     });
     
-    const csvString = csvRows.join('\n');
+    // Add BOM for Excel UTF-8 support
+    const csvString = '\uFEFF' + csvRows.join('\n');
     const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     
@@ -192,8 +206,46 @@ export default function App() {
     document.body.removeChild(link);
   };
 
+  const handleExportCustom = async () => {
+    if (!customStart || !customEnd) {
+      alert('กรุณาเลือกวันที่เริ่มต้นและสิ้นสุด');
+      return;
+    }
+    setIsExporting(true);
+    try {
+      const startTs = new Date(customStart).getTime();
+      const endTs = new Date(customEnd).getTime();
+      
+      const q = query(
+        collection(db, 'sensor_data'),
+        where('timestamp', '>=', startTs),
+        where('timestamp', '<=', endTs),
+        orderBy('timestamp', 'desc')
+      );
+      const snapshot = await getDocs(q);
+      const sensorReadings = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      } as SensorData));
+      sensorReadings.sort((a, b) => a.timestamp - b.timestamp);
+      
+      processAndDownloadCSV(sensorReadings);
+      setShowExportModal(false);
+    } catch (err) {
+      console.error("Error exporting custom data:", err);
+      alert('เกิดข้อผิดพลาดในการโหลดข้อมูล: ' + err);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const exportToCSV = () => {
+    setShowExportModal(true);
+  };
+
   // Filter data based on selected time range
   const filteredData = useMemo(() => {
+    if (timeRange === 'CUSTOM') return data;
     const now = Date.now();
     let cutoff = now;
     if (timeRange === '1H') cutoff = now - 60 * 60 * 1000;
@@ -1001,6 +1053,59 @@ void loop() {
 
       <main className="flex-1 flex flex-col md:flex-row p-4 sm:p-6 gap-4 sm:gap-6 md:overflow-hidden overflow-y-auto relative max-w-[1600px] mx-auto w-full">
         
+        {/* Export CSV/Excel Modal */}
+        {showExportModal && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden animate-in zoom-in-95">
+              <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                  <Download className="w-4 h-4 text-slate-600" /> ส่งออกข้อมูล (Excel / CSV)
+                </h3>
+                <button onClick={() => setShowExportModal(false)} className="text-slate-400 hover:text-slate-600">✕</button>
+              </div>
+              <div className="p-5 space-y-4">
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  เลือกช่วงวันที่เริ่มต้นและสิ้นสุด เพื่อดึงข้อมูลประวัติทั้งหมดจากฐานข้อมูลสำหรับการวิเคราะห์ผ่าน Excel
+                </p>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">วันที่เริ่มต้น</label>
+                  <input 
+                    type="datetime-local" 
+                    value={customStart}
+                    onChange={(e) => setCustomStart(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm text-slate-800"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">วันที่สิ้นสุด</label>
+                  <input 
+                    type="datetime-local" 
+                    value={customEnd}
+                    onChange={(e) => setCustomEnd(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm text-slate-800"
+                  />
+                </div>
+              </div>
+              <div className="p-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-2">
+                <button 
+                  onClick={() => setShowExportModal(false)}
+                  className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-200 rounded-lg transition-colors"
+                >
+                  ยกเลิก
+                </button>
+                <button 
+                  onClick={handleExportCustom}
+                  disabled={isExporting}
+                  className="px-4 py-2 text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors flex items-center gap-2"
+                >
+                  {isExporting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  {isExporting ? 'กำลังโหลด...' : 'ดาวน์โหลด CSV'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ESP32 C++ Code Modal */}
         {showCodeModal && (
           <div className="absolute inset-0 z-30 flex items-center justify-center p-4 sm:p-6 bg-slate-900/50 backdrop-blur-sm animate-in fade-in">
@@ -1800,6 +1905,59 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                     </div>
                   </div>
                 </div>
+                <div className="pt-3 border-t border-slate-100 space-y-2">
+                  <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <AlertCircle className="w-4 h-4 text-green-600" /> ตั้งค่าแจ้งเตือนผ่าน LINE (Messaging API)
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    ตั้งค่าให้บอทแจ้งเตือนเข้าแชทส่วนตัว หรือ <span className="font-bold text-green-600">ดึงเข้ากลุ่ม LINE (Group)</span>
+                  </p>
+                  
+                  <div className="flex items-center gap-2 mb-2">
+                    <input 
+                      type="checkbox" 
+                      id="lineNotifyEnabled"
+                      checked={settings.lineNotifyEnabled || false}
+                      onChange={(e) => updateDeviceConfig({ lineNotifyEnabled: e.target.checked })}
+                      className="w-4 h-4 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500"
+                    />
+                    <label htmlFor="lineNotifyEnabled" className="text-xs font-semibold text-slate-700">เปิดใช้งานแจ้งเตือน LINE</label>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 gap-3 pt-1">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        1. LINE Channel Access Token
+                      </label>
+                      <input 
+                        type="text" 
+                        value={settings.lineToken || ''}
+                        onChange={(e) => updateDeviceConfig({ lineToken: e.target.value })}
+                        placeholder="กรอก Channel Access Token..."
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-green-500 outline-none text-xs font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        2. User ID / Group ID
+                      </label>
+                      <input 
+                        type="text" 
+                        value={settings.lineUserId || ''}
+                        onChange={(e) => updateDeviceConfig({ lineUserId: e.target.value })}
+                        placeholder="U123... (ส่วนตัว) หรือ C123... (กลุ่ม)"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-green-500 outline-none text-xs font-mono"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed bg-slate-50 p-2 rounded border border-slate-100">
+                        💡 <b>วิธีให้บอทส่งเข้ากลุ่มอัตโนมัติ:</b> นำ Webhook URL ด้านล่างไปใส่ใน LINE Developers 
+                        แล้วเชิญบอทเข้ากลุ่ม LINE ของคุณ ระบบจะดึง Group ID (ขึ้นต้นด้วย C) มาใส่ในช่องนี้ให้อัตโนมัติ!
+                        <br/><br/>
+                        <b>Webhook URL:</b> <code className="text-blue-600 break-all select-all">{window.location.origin}/api/line-webhook</code>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
               </div>
               
               <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-between">
