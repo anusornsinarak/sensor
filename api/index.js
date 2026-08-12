@@ -1,6 +1,276 @@
-// Vercel Serverless Function entry point
-const path = require('path');
-module.exports = async (req, res) => {
-  const app = await require(path.join(__dirname, '../dist/server.cjs')).default;
+// server.ts
+import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit, onSnapshot, where, orderBy } from "firebase/firestore";
+import fs from "fs";
+import axios from "axios";
+var firebaseConfig = JSON.parse(fs.readFileSync("./firebase-applet-config.json", "utf8"));
+var firebaseApp = initializeApp(firebaseConfig);
+var db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+var activeSettings = {
+  maxTemp: 30,
+  maxHum: 65,
+  sendIntervalSec: 60,
+  tempOffset: 0,
+  humOffset: 0,
+  lineToken: "",
+  lineUserId: "",
+  lineNotifyEnabled: false,
+  updatedAt: Date.now()
+};
+var lastAlertTime = 0;
+var ALERT_COOLDOWN_MS = 5 * 60 * 1e3;
+var loadSettings = async () => {
+  try {
+    const configDoc = await getDoc(doc(db, "device_settings", "config"));
+    if (configDoc.exists()) {
+      activeSettings = { ...activeSettings, ...configDoc.data() };
+      console.log("Loaded device settings from Firestore:", activeSettings);
+    } else {
+      await setDoc(doc(db, "device_settings", "config"), activeSettings);
+    }
+  } catch (err) {
+    console.error("Error loading device settings:", err);
+  }
+};
+loadSettings();
+var serverStartTime = Date.now();
+var sensorDataRef = collection(db, "sensor_data");
+var qNewData = query(sensorDataRef, where("timestamp", ">", serverStartTime));
+onSnapshot(qNewData, (snapshot) => {
+  snapshot.docChanges().forEach((change) => {
+    if (change.type === "added") {
+      const data = change.doc.data();
+      checkAndSendAlert(data);
+    }
+  });
+});
+async function checkAndSendAlert(data) {
+  if (!activeSettings.lineNotifyEnabled || !activeSettings.lineToken || !activeSettings.lineUserId) return;
+  const now = Date.now();
+  if (now - lastAlertTime < ALERT_COOLDOWN_MS) return;
+  const isErr = data.sensor_error || data.temperature === 0 && data.humidity === 0;
+  let alertMessage = "";
+  if (isErr) {
+    alertMessage = "\u26A0\uFE0F [\u0E41\u0E08\u0E49\u0E07\u0E40\u0E15\u0E37\u0E2D\u0E19] \u0E40\u0E0B\u0E19\u0E40\u0E0B\u0E2D\u0E23\u0E4C\u0E21\u0E35\u0E1B\u0E31\u0E0D\u0E2B\u0E32 (Sensor Error)\n\u{1F4A1} \u0E04\u0E33\u0E41\u0E19\u0E30\u0E19\u0E33: \u0E01\u0E23\u0E38\u0E13\u0E32\u0E15\u0E23\u0E27\u0E08\u0E2A\u0E2D\u0E1A\u0E2A\u0E32\u0E22\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D \u0E2B\u0E23\u0E37\u0E2D\u0E23\u0E35\u0E2A\u0E15\u0E32\u0E23\u0E4C\u0E17\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E04\u0E23\u0E31\u0E1A";
+  } else if (data.temperature > activeSettings.maxTemp) {
+    alertMessage = `\u{1F525} [\u0E41\u0E08\u0E49\u0E07\u0E40\u0E15\u0E37\u0E2D\u0E19] \u0E2D\u0E38\u0E13\u0E2B\u0E20\u0E39\u0E21\u0E34\u0E2A\u0E39\u0E07\u0E40\u0E01\u0E34\u0E19\u0E01\u0E33\u0E2B\u0E19\u0E14!
+\u{1F321}\uFE0F \u0E2D\u0E38\u0E13\u0E2B\u0E20\u0E39\u0E21\u0E34\u0E1B\u0E31\u0E08\u0E08\u0E38\u0E1A\u0E31\u0E19: ${data.temperature.toFixed(1)}\xB0C (\u0E15\u0E31\u0E49\u0E07\u0E44\u0E27\u0E49: ${activeSettings.maxTemp}\xB0C)
+\u{1F4A1} \u0E04\u0E33\u0E41\u0E19\u0E30\u0E19\u0E33: \u0E04\u0E27\u0E23\u0E40\u0E1B\u0E34\u0E14\u0E1E\u0E31\u0E14\u0E25\u0E21\u0E23\u0E30\u0E1A\u0E32\u0E22\u0E2D\u0E32\u0E01\u0E32\u0E28, \u0E40\u0E1B\u0E34\u0E14\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E1B\u0E23\u0E31\u0E1A\u0E2D\u0E32\u0E01\u0E32\u0E28 \u0E2B\u0E23\u0E37\u0E2D\u0E40\u0E1B\u0E34\u0E14\u0E2B\u0E19\u0E49\u0E32\u0E15\u0E48\u0E32\u0E07\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E25\u0E14\u0E2D\u0E38\u0E13\u0E2B\u0E20\u0E39\u0E21\u0E34\u0E04\u0E23\u0E31\u0E1A`;
+  } else if (data.humidity > activeSettings.maxHum) {
+    alertMessage = `\u{1F4A7} [\u0E41\u0E08\u0E49\u0E07\u0E40\u0E15\u0E37\u0E2D\u0E19] \u0E04\u0E27\u0E32\u0E21\u0E0A\u0E37\u0E49\u0E19\u0E2A\u0E39\u0E07\u0E40\u0E01\u0E34\u0E19\u0E01\u0E33\u0E2B\u0E19\u0E14!
+\u{1F4A6} \u0E04\u0E27\u0E32\u0E21\u0E0A\u0E37\u0E49\u0E19\u0E1B\u0E31\u0E08\u0E08\u0E38\u0E1A\u0E31\u0E19: ${data.humidity.toFixed(1)}% (\u0E15\u0E31\u0E49\u0E07\u0E44\u0E27\u0E49: ${activeSettings.maxHum}%)
+\u{1F4A1} \u0E04\u0E33\u0E41\u0E19\u0E30\u0E19\u0E33: \u0E04\u0E27\u0E23\u0E40\u0E1B\u0E34\u0E14\u0E1E\u0E31\u0E14\u0E25\u0E21\u0E14\u0E39\u0E14\u0E2D\u0E32\u0E01\u0E32\u0E28 \u0E2B\u0E23\u0E37\u0E2D\u0E43\u0E0A\u0E49\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E14\u0E39\u0E14\u0E04\u0E27\u0E32\u0E21\u0E0A\u0E37\u0E49\u0E19 \u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E1B\u0E49\u0E2D\u0E07\u0E01\u0E31\u0E19\u0E40\u0E0A\u0E37\u0E49\u0E2D\u0E23\u0E32\u0E04\u0E23\u0E31\u0E1A`;
+  }
+  if (alertMessage) {
+    try {
+      await axios.post("https://api.line.me/v2/bot/message/push", {
+        to: activeSettings.lineUserId,
+        messages: [{ type: "text", text: alertMessage }]
+      }, {
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${activeSettings.lineToken}`
+        }
+      });
+      console.log("Sent LINE OA Alert:", alertMessage);
+      lastAlertTime = now;
+    } catch (err) {
+      console.error("Failed to send LINE OA alert:", err);
+    }
+  }
+}
+async function startServer() {
+  const app = express();
+  const PORT = 3e3;
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
+  app.use(express.text({ type: "*/*" }));
+  app.get("/api/device-config", (req, res) => {
+    res.json(activeSettings);
+  });
+  app.post("/api/line-webhook", async (req, res) => {
+    res.status(200).send("OK");
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch (e) {
+      }
+    }
+    if (body.events && Array.isArray(body.events)) {
+      for (const event of body.events) {
+        if (event.source && event.source.type === "group" && event.source.groupId) {
+          const groupId = event.source.groupId;
+          if (activeSettings.lineUserId !== groupId) {
+            activeSettings.lineUserId = groupId;
+            activeSettings.updatedAt = Date.now();
+            try {
+              await setDoc(doc(db, "config", "settings"), activeSettings, { merge: true });
+              console.log("Successfully auto-captured LINE Group ID:", groupId);
+              if (activeSettings.lineToken) {
+                await axios.post("https://api.line.me/v2/bot/message/push", {
+                  to: groupId,
+                  messages: [{ type: "text", text: "\u{1F7E2} \u0E2A\u0E27\u0E31\u0E2A\u0E14\u0E35\u0E04\u0E23\u0E31\u0E1A! \u0E23\u0E30\u0E1A\u0E1A Dashboard \u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D\u0E01\u0E31\u0E1A\u0E01\u0E25\u0E38\u0E48\u0E21\u0E19\u0E35\u0E49\u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08\u0E41\u0E25\u0E49\u0E27\n\n\u0E23\u0E30\u0E1A\u0E1A\u0E08\u0E30\u0E2A\u0E48\u0E07\u0E01\u0E32\u0E23\u0E41\u0E08\u0E49\u0E07\u0E40\u0E15\u0E37\u0E2D\u0E19\u0E04\u0E48\u0E32\u0E40\u0E0B\u0E19\u0E40\u0E0B\u0E2D\u0E23\u0E4C\u0E17\u0E35\u0E48\u0E19\u0E35\u0E48\u0E04\u0E23\u0E31\u0E1A \u{1F4CA}" }]
+                }, {
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${activeSettings.lineToken}`
+                  }
+                });
+              }
+            } catch (err) {
+              console.error("Error saving or replying to LINE Group:", err);
+            }
+          }
+        }
+        if (event.type === "message" && event.message && event.message.type === "text") {
+          const msgText = event.message.text.trim().toLowerCase();
+          if (msgText === "check") {
+            try {
+              const qLatest = query(collection(db, "sensor_data"), orderBy("timestamp", "desc"), limit(1));
+              const snap = await getDocs(qLatest);
+              let replyText = "";
+              if (!snap.empty) {
+                const latestData = snap.docs[0].data();
+                const isErr = latestData.sensor_error || latestData.temperature === 0 && latestData.humidity === 0;
+                if (isErr) {
+                  replyText = "\u26A0\uFE0F \u0E2A\u0E16\u0E32\u0E19\u0E30\u0E1B\u0E31\u0E08\u0E08\u0E38\u0E1A\u0E31\u0E19: \u0E40\u0E0B\u0E19\u0E40\u0E0B\u0E2D\u0E23\u0E4C\u0E21\u0E35\u0E1B\u0E31\u0E0D\u0E2B\u0E32 (Sensor Error)\n\u{1F4A1} \u0E04\u0E33\u0E41\u0E19\u0E30\u0E19\u0E33: \u0E01\u0E23\u0E38\u0E13\u0E32\u0E15\u0E23\u0E27\u0E08\u0E2A\u0E2D\u0E1A\u0E2A\u0E32\u0E22\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D \u0E2B\u0E23\u0E37\u0E2D\u0E23\u0E35\u0E2A\u0E15\u0E32\u0E23\u0E4C\u0E17\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E04\u0E23\u0E31\u0E1A";
+                } else {
+                  replyText = `\u{1F4CA} \u0E2A\u0E16\u0E32\u0E19\u0E30\u0E1B\u0E31\u0E08\u0E08\u0E38\u0E1A\u0E31\u0E19:
+\u{1F321}\uFE0F \u0E2D\u0E38\u0E13\u0E2B\u0E20\u0E39\u0E21\u0E34: ${latestData.temperature.toFixed(1)}\xB0C
+\u{1F4A6} \u0E04\u0E27\u0E32\u0E21\u0E0A\u0E37\u0E49\u0E19: ${latestData.humidity.toFixed(1)}%`;
+                }
+              } else {
+                replyText = "\u274C \u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E40\u0E0B\u0E19\u0E40\u0E0B\u0E2D\u0E23\u0E4C\u0E43\u0E19\u0E23\u0E30\u0E1A\u0E1A\u0E04\u0E23\u0E31\u0E1A";
+              }
+              if (activeSettings.lineToken && event.replyToken) {
+                await axios.post("https://api.line.me/v2/bot/message/reply", {
+                  replyToken: event.replyToken,
+                  messages: [{ type: "text", text: replyText }]
+                }, {
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${activeSettings.lineToken}`
+                  }
+                });
+              }
+            } catch (err) {
+              console.error("Error replying to check command:", err);
+            }
+          }
+        }
+      }
+    }
+  });
+  app.post("/api/device-config", async (req, res) => {
+    const { maxTemp, maxHum, sendIntervalSec, tempOffset, humOffset, lineToken, lineUserId, lineNotifyEnabled } = req.body;
+    if (maxTemp != null) activeSettings.maxTemp = Number(maxTemp);
+    if (maxHum != null) activeSettings.maxHum = Number(maxHum);
+    if (sendIntervalSec != null) activeSettings.sendIntervalSec = Number(sendIntervalSec);
+    if (tempOffset != null) activeSettings.tempOffset = Number(tempOffset);
+    if (humOffset != null) activeSettings.humOffset = Number(humOffset);
+    if (lineToken !== void 0) activeSettings.lineToken = lineToken;
+    if (lineUserId !== void 0) activeSettings.lineUserId = lineUserId;
+    if (lineNotifyEnabled !== void 0) activeSettings.lineNotifyEnabled = Boolean(lineNotifyEnabled);
+    activeSettings.updatedAt = Date.now();
+    try {
+      await setDoc(doc(db, "device_settings", "config"), activeSettings);
+      res.json({ success: true, config: activeSettings });
+    } catch (err) {
+      console.error("Error updating settings in Firestore:", err);
+      res.status(500).json({ error: "Failed to update settings" });
+    }
+  });
+  app.post("/api/clear-sensor-data", async (req, res) => {
+    try {
+      const q = query(collection(db, "sensor_data"), limit(500));
+      const snapshot = await getDocs(q);
+      const deletePromises = snapshot.docs.map((docSnap) => deleteDoc(doc(db, "sensor_data", docSnap.id)));
+      await Promise.all(deletePromises);
+      res.json({ success: true, count: snapshot.docs.length });
+    } catch (err) {
+      console.error("Error clearing data:", err);
+      res.status(500).json({ error: "Failed to clear data" });
+    }
+  });
+  app.post("/api/sensor-data", async (req, res) => {
+    let bodyData = req.body;
+    if (typeof bodyData === "string") {
+      try {
+        bodyData = JSON.parse(bodyData);
+      } catch (e) {
+        bodyData = {};
+      }
+    }
+    const temperature = bodyData?.temperature ?? req.query?.temperature;
+    const humidity = bodyData?.humidity ?? req.query?.humidity;
+    const sensor_error = bodyData?.sensor_error ?? req.query?.sensor_error;
+    if (temperature == null || humidity == null) {
+      res.status(400).json({ error: "Missing temperature or humidity" });
+      return;
+    }
+    const tempNum = Number(temperature);
+    const humNum = Number(humidity);
+    const isError = Boolean(sensor_error) || tempNum === 0 && humNum === 0;
+    let rawTs = bodyData?.timestamp || req.query?.timestamp;
+    let finalTimestamp = Date.now();
+    if (rawTs) {
+      const parsedTs = Number(rawTs);
+      if (!isNaN(parsedTs) && parsedTs > 0) {
+        finalTimestamp = parsedTs < 1e10 ? parsedTs * 1e3 : parsedTs;
+      }
+    }
+    const newData = {
+      timestamp: finalTimestamp,
+      temperature: tempNum,
+      humidity: humNum,
+      ...isError ? { sensor_error: true } : {}
+    };
+    activeSettings.updatedAt = Date.now();
+    try {
+      const docRef = await addDoc(collection(db, "sensor_data"), newData);
+      await setDoc(doc(db, "device_settings", "config"), { ...activeSettings, lastSeen: Date.now() }, { merge: true });
+      res.json({
+        success: true,
+        id: docRef.id,
+        data: newData,
+        config: activeSettings
+      });
+    } catch (err) {
+      console.error("Error saving data to Firestore:", err);
+      res.status(500).json({ error: "Failed to save data" });
+    }
+  });
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa"
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*all", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+  if (process.env.VERCEL) {
+    return app;
+  } else {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  }
+}
+var appPromise = startServer();
+var server_default = async (req, res) => {
+  const app = await appPromise;
   return app(req, res);
 };
+export {
+  server_default as default
+};
+//# sourceMappingURL=index.js.map

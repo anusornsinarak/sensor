@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React /* Vercel Fix 5 */, { useEffect, useState, useMemo } from 'react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine 
 } from 'recharts';
