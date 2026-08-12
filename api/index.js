@@ -1,3 +1,5 @@
 // Vercel Serverless Function entry point
-const server = require('../dist/server.cjs');
-module.exports = server;
+module.exports = async (req, res) => {
+  const app = await require('../dist/server.cjs').default;
+  return app(req, res);
+};
