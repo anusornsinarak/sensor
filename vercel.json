@@ -3,7 +3,10 @@
   "outputDirectory": "dist",
   "framework": "vite",
   "functions": {
-    "api/index.js": {
+    "api/**/*.js": {
+      "includeFiles": "../dist/**"
+    },
+    "api/**/*.ts": {
       "includeFiles": "../dist/**"
     }
   },
