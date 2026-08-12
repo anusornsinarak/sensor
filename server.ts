@@ -1,13 +1,12 @@
 import express from 'express';
-// Vercel deployment update trigger 3
+// Vercel deployment update trigger 6
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit, onSnapshot, where, orderBy } from 'firebase/firestore';
-import fs from 'fs';
 import axios from 'axios';
+import firebaseConfig from './firebase-applet-config.json';
 
-const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf8'));
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
@@ -308,7 +307,7 @@ async function startServer() {
     }
   });
 
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
