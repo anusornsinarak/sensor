@@ -321,9 +321,16 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+  // If running on Vercel Serverless, export the app instead of listening
+  if (process.env.VERCEL) {
+    return app;
+  } else {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  }
 }
 
-startServer();
+// For local/Cloud Run development
+const appPromise = startServer();
+export default appPromise;
