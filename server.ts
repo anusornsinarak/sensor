@@ -64,7 +64,10 @@ async function checkAndSendAlert(data: SensorData) {
   if (!activeSettings.lineToken) {
     await loadSettings();
   }
-  if (!activeSettings.lineNotifyEnabled || !activeSettings.lineToken || !activeSettings.lineUserId) return;
+  const cleanToken = (activeSettings.lineToken || '').trim();
+  const cleanUserId = (activeSettings.lineUserId || '').trim();
+
+  if (!activeSettings.lineNotifyEnabled || !cleanToken || !cleanUserId) return;
   
   const now = Date.now();
   if (now - lastAlertTime < ALERT_COOLDOWN_MS) return; // Prevent spam
@@ -88,18 +91,18 @@ async function checkAndSendAlert(data: SensorData) {
   if (alertMessage) {
     try {
       await axios.post('https://api.line.me/v2/bot/message/push', {
-        to: activeSettings.lineUserId,
+        to: cleanUserId,
         messages: [{ type: 'text', text: alertMessage }]
       }, {
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${activeSettings.lineToken}`
+          'Authorization': `Bearer ${cleanToken}`
         }
       });
       console.log('Sent LINE OA Alert:', alertMessage);
       lastAlertTime = now;
-    } catch (err) {
-      console.error('Failed to send LINE OA alert:', err);
+    } catch (err: any) {
+      console.error('Failed to send LINE OA alert:', err?.response?.data || err?.message || err);
     }
   }
 }
@@ -117,7 +120,7 @@ async function startServer() {
     res.json(activeSettings);
   });
 
-  // API Route: LINE Webhook (Auto-capture Group ID & Reply Commands)
+  // API Route: LINE Webhook (Auto-capture Group ID / User ID & Reply Commands)
   app.post('/api/line-webhook', async (req, res) => {
     try {
       await loadSettings();
@@ -129,39 +132,56 @@ async function startServer() {
       
       if (body && body.events && Array.isArray(body.events)) {
         for (const event of body.events) {
-          // Auto-save the Group ID if added to a group
-          if (event.source && event.source.type === 'group' && event.source.groupId) {
-            const groupId = event.source.groupId;
-            
-            if (activeSettings.lineUserId !== groupId) {
-              activeSettings.lineUserId = groupId;
-              activeSettings.updatedAt = Date.now();
-              
-              try {
-                await setDoc(doc(db, 'device_settings', 'config'), activeSettings, { merge: true });
-                console.log('Successfully auto-captured LINE Group ID:', groupId);
-                
-                if (activeSettings.lineToken) {
-                  await axios.post('https://api.line.me/v2/bot/message/push', {
-                    to: groupId,
-                    messages: [{ type: 'text', text: '🟢 สวัสดีครับ! ระบบ Dashboard เชื่อมต่อกับกลุ่มนี้สำเร็จแล้ว\n\nระบบจะส่งการแจ้งเตือนค่าเซนเซอร์ที่นี่ครับ 📊' }]
-                  }, {
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'Authorization': `Bearer ${activeSettings.lineToken}`
-                    }
-                  });
-                }
-              } catch (err) {
-                console.error('Error saving or replying to LINE Group:', err);
-              }
+          const cleanToken = (activeSettings.lineToken || '').trim();
+
+          // Auto-save the Group ID or User ID
+          let targetId = '';
+          if (event.source) {
+            if (event.source.type === 'group' && event.source.groupId) {
+              targetId = event.source.groupId;
+            } else if (event.source.type === 'user' && event.source.userId) {
+              targetId = event.source.userId;
             }
           }
 
-          // Handle text messages for "check", "เช็ค", "status", "สถานะ"
+          if (targetId && activeSettings.lineUserId !== targetId) {
+            activeSettings.lineUserId = targetId;
+            activeSettings.updatedAt = Date.now();
+            
+            try {
+              await setDoc(doc(db, 'device_settings', 'config'), activeSettings, { merge: true });
+              console.log('Successfully auto-captured LINE Target ID:', targetId);
+              
+              if (cleanToken) {
+                await axios.post('https://api.line.me/v2/bot/message/push', {
+                  to: targetId,
+                  messages: [{ type: 'text', text: '🟢 สวัสดีครับ! ระบบ Dashboard เชื่อมต่อสำเร็จแล้ว\n\nระบบจะส่งการแจ้งเตือนค่าเซนเซอร์ที่นี่ครับ 📊' }]
+                }, {
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${cleanToken}`
+                  }
+                });
+              }
+            } catch (err) {
+              console.error('Error saving or replying to LINE Target:', err);
+            }
+          }
+
+          // Handle text messages for "check", "เช็ค", "status", "สถานะ", etc.
           if (event.type === 'message' && event.message && event.message.type === 'text') {
-            const msgText = event.message.text.trim().toLowerCase();
-            if (msgText === 'check' || msgText === 'เช็ค' || msgText === 'status' || msgText === 'สถานะ') {
+            const msgText = (event.message.text || '').trim().toLowerCase();
+            const isCheckCommand = 
+              msgText.includes('check') || 
+              msgText.includes('เช็ค') || 
+              msgText.includes('เชค') || 
+              msgText.includes('status') || 
+              msgText.includes('สถานะ') || 
+              msgText.includes('อุณหภูมิ') || 
+              msgText.includes('ความชื้น') ||
+              msgText === 'c';
+
+            if (isCheckCommand) {
               try {
                 // Fetch latest sensor data
                 const qLatest = query(collection(db, 'sensor_data'), orderBy('timestamp', 'desc'), limit(1));
@@ -182,19 +202,22 @@ async function startServer() {
                 }
 
                 // Reply back using the replyToken
-                if (activeSettings.lineToken && event.replyToken) {
+                if (cleanToken && event.replyToken) {
                   await axios.post('https://api.line.me/v2/bot/message/reply', {
                     replyToken: event.replyToken,
                     messages: [{ type: 'text', text: replyText }]
                   }, {
                     headers: {
                       'Content-Type': 'application/json',
-                      'Authorization': `Bearer ${activeSettings.lineToken}`
+                      'Authorization': `Bearer ${cleanToken}`
                     }
                   });
+                  console.log('Successfully replied to LINE command:', msgText);
+                } else {
+                  console.warn('Cannot reply: cleanToken is empty or missing replyToken');
                 }
-              } catch (err) {
-                console.error('Error replying to check command:', err);
+              } catch (err: any) {
+                console.error('Error replying to check command:', err?.response?.data || err?.message || err);
               }
             }
           }
