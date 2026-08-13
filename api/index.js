@@ -1,14 +1,27 @@
 // server.ts
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { initializeApp } from "firebase/app";
-import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit, onSnapshot, where, orderBy } from "firebase/firestore";
-import fs from "fs";
+import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit, orderBy } from "firebase/firestore";
 import axios from "axios";
-var firebaseConfig = JSON.parse(fs.readFileSync("./firebase-applet-config.json", "utf8"));
-var firebaseApp = initializeApp(firebaseConfig);
-var db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+
+// firebase-applet-config.json
+var firebase_applet_config_default = {
+  projectId: "gen-lang-client-0516953163",
+  appId: "1:427426951734:web:55262e3387d2e6f9da5e97",
+  apiKey: "AIzaSyCXLGKCPAStDBt0RTcCUdX3ew4c_uB6oxs",
+  authDomain: "gen-lang-client-0516953163.firebaseapp.com",
+  firestoreDatabaseId: "ai-studio-iotsensordashboa-6c74a260-d381-44d8-ae58-a587051c2d98",
+  storageBucket: "gen-lang-client-0516953163.firebasestorage.app",
+  messagingSenderId: "427426951734",
+  measurementId: "",
+  oAuthClientId: "427426951734-629ukl6al33j508sfj3sdf3pik6lh22q.apps.googleusercontent.com",
+  recaptchaSiteKey: ""
+};
+
+// server.ts
+var firebaseApp = initializeApp(firebase_applet_config_default);
+var db = getFirestore(firebaseApp, firebase_applet_config_default.firestoreDatabaseId);
 var activeSettings = {
   maxTemp: 30,
   maxHum: 65,
@@ -36,17 +49,6 @@ var loadSettings = async () => {
   }
 };
 loadSettings();
-var serverStartTime = Date.now();
-var sensorDataRef = collection(db, "sensor_data");
-var qNewData = query(sensorDataRef, where("timestamp", ">", serverStartTime));
-onSnapshot(qNewData, (snapshot) => {
-  snapshot.docChanges().forEach((change) => {
-    if (change.type === "added") {
-      const data = change.doc.data();
-      checkAndSendAlert(data);
-    }
-  });
-});
 async function checkAndSendAlert(data) {
   if (!activeSettings.lineNotifyEnabled || !activeSettings.lineToken || !activeSettings.lineUserId) return;
   const now = Date.now();
@@ -233,6 +235,7 @@ async function startServer() {
     try {
       const docRef = await addDoc(collection(db, "sensor_data"), newData);
       await setDoc(doc(db, "device_settings", "config"), { ...activeSettings, lastSeen: Date.now() }, { merge: true });
+      checkAndSendAlert(newData).catch((err) => console.error("Alert error:", err));
       res.json({
         success: true,
         id: docRef.id,
@@ -244,7 +247,8 @@ async function startServer() {
       res.status(500).json({ error: "Failed to save data" });
     }
   });
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa"

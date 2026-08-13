@@ -1,9 +1,8 @@
 import express from 'express';
-// Vercel deployment update trigger 6
+// Vercel deployment update trigger 7
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit, onSnapshot, where, orderBy } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, getDocs, doc, setDoc, getDoc, deleteDoc, query, limit, where, orderBy } from 'firebase/firestore';
 import axios from 'axios';
 import firebaseConfig from './firebase-applet-config.json';
 
@@ -60,20 +59,6 @@ const loadSettings = async () => {
   }
 };
 loadSettings();
-
-// Listen to Firestore for new sensor_data to trigger LINE Alerts
-const serverStartTime = Date.now();
-const sensorDataRef = collection(db, 'sensor_data');
-const qNewData = query(sensorDataRef, where('timestamp', '>', serverStartTime));
-
-onSnapshot(qNewData, (snapshot) => {
-  snapshot.docChanges().forEach((change) => {
-    if (change.type === 'added') {
-      const data = change.doc.data() as SensorData;
-      checkAndSendAlert(data);
-    }
-  });
-});
 
 async function checkAndSendAlert(data: SensorData) {
   if (!activeSettings.lineNotifyEnabled || !activeSettings.lineToken || !activeSettings.lineUserId) return;
@@ -294,6 +279,9 @@ async function startServer() {
       // Also update lastSeen in device_settings so clients receive instant online heartbeat
       await setDoc(doc(db, 'device_settings', 'config'), { ...activeSettings, lastSeen: Date.now() }, { merge: true });
 
+      // Trigger LINE alert if threshold breached
+      checkAndSendAlert(newData).catch(err => console.error('Alert error:', err));
+
       // Return response along with current activeSettings (including fan control state and threshold)
       res.json({ 
         success: true, 
@@ -308,6 +296,7 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
