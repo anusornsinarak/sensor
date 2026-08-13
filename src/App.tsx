@@ -91,9 +91,53 @@ export default function App() {
     }
   };
 
+  const [isSendingLineBackup, setIsSendingLineBackup] = useState(false);
+  const handleSendLineBackup = async () => {
+    setIsSendingLineBackup(true);
+    try {
+      const res = await fetch('/api/send-line-backup', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        setRefreshToast('ส่งลิงก์ไฟล์ CSV สำรองข้อมูลเข้า LINE เรียบร้อยแล้ว!');
+        setTimeout(() => setRefreshToast(null), 3500);
+      } else {
+        alert(data.error || 'ไม่สามารถส่งไฟล์เข้า LINE ได้ กรุณาตรวจสอบ LINE Token');
+      }
+    } catch (err) {
+      console.error('Failed to send LINE backup:', err);
+    } finally {
+      setIsSendingLineBackup(false);
+    }
+  };
+
+  const [isCleaning1Year, setIsCleaning1Year] = useState(false);
+  const handleCleanup1Year = async () => {
+    if (!window.confirm('ระบบจะส่งลิงก์สำรองข้อมูล CSV เข้า LINE ก่อน แล้วทำการลบข้อมูลที่เก่ากว่า 1 ปี (365 วัน) ออกจากระบบ ต้องการดำเนินการต่อหรือไม่?')) return;
+    setIsCleaning1Year(true);
+    try {
+      const res = await fetch('/api/cleanup-old-data', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days: 365 })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setRefreshToast(data.message || 'ส่งไฟล์สำรองเข้า LINE และล้างข้อมูลเก่าเกิน 1 ปีเรียบร้อยแล้ว');
+        setTimeout(() => setRefreshToast(null), 4000);
+        handleRefreshData();
+      } else {
+        alert(data.error || 'ไม่สามารถดำเนินการล้างข้อมูลได้');
+      }
+    } catch (err) {
+      console.error('Failed to cleanup 1 year data:', err);
+    } finally {
+      setIsCleaning1Year(false);
+    }
+  };
+
   const [isClearingData, setIsClearingData] = useState(false);
   const handleClearHistory = async () => {
-    if (!window.confirm('คุณต้องการล้างประวัติข้อมูลเก่าในระบบเพื่อตั้งต้นใหม่ใช่หรือไม่?')) return;
+    if (!window.confirm('คุณต้องการล้างประวัติข้อมูลเก่าทั้งหมดในระบบเพื่อตั้งต้นใหม่ใช่หรือไม่?')) return;
     setIsClearingData(true);
     try {
       const res = await fetch('/api/clear-sensor-data', { method: 'POST' });
@@ -1985,20 +2029,58 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                   </button>
                 </div>
 
-                {/* Clear History */}
-                <div className="pt-2 flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-bold text-slate-700">ล้างประวัติข้อมูลเก่า</p>
-                    <p className="text-[11px] text-slate-500">ลบข้อมูลทดสอบใน Firestore เพื่อเริ่มนับใหม่</p>
+                {/* Backup & Data Retention Management */}
+                <div className="pt-3 border-t border-slate-100 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <Download className="w-3.5 h-3.5 text-green-600" />
+                        สำรองข้อมูล CSV เข้า LINE
+                      </p>
+                      <p className="text-[11px] text-slate-500">ส่งลิงก์ดาวน์โหลดไฟล์ CSV เข้าห้องแชต LINE เพื่อเก็บไว้ในเครื่อง</p>
+                    </div>
+                    <button
+                      onClick={handleSendLineBackup}
+                      disabled={isSendingLineBackup}
+                      className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50 shrink-0"
+                    >
+                      <Download className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>{isSendingLineBackup ? 'กำลังส่ง...' : 'ส่งเข้า LINE'}</span>
+                    </button>
                   </div>
-                  <button
-                    onClick={handleClearHistory}
-                    disabled={isClearingData}
-                    className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>{isClearingData ? 'กำลังล้าง...' : 'ล้างประวัติเก่า'}</span>
-                  </button>
+
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <Trash2 className="w-3.5 h-3.5 text-amber-600" />
+                        สำรองเข้า LINE & ล้างข้อมูลเก่าเกิน 1 ปี
+                      </p>
+                      <p className="text-[11px] text-slate-500">ส่งไฟล์ CSV สำรองเข้า LINE ก่อนลบประวัติที่เก่ากว่า 365 วันเพื่อคืนพื้นที่</p>
+                    </div>
+                    <button
+                      onClick={handleCleanup1Year}
+                      disabled={isCleaning1Year}
+                      className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50 shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-amber-600" />
+                      <span>{isCleaning1Year ? 'กำลังล้าง...' : 'ล้างข้อมูล > 1 ปี'}</span>
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-1">
+                    <div>
+                      <p className="text-xs font-bold text-rose-700">ล้างประวัติข้อมูลทั้งหมด</p>
+                      <p className="text-[11px] text-slate-500">ลบประวัติทั้งหมดใน Firestore เพื่อเริ่มนับใหม่</p>
+                    </div>
+                    <button
+                      onClick={handleClearHistory}
+                      disabled={isClearingData}
+                      className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50 shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{isClearingData ? 'กำลังล้าง...' : 'ล้างทั้งหมด'}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

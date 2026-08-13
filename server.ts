@@ -120,6 +120,127 @@ async function startServer() {
     res.json(activeSettings);
   });
 
+  // API Route: Download CSV Backup File
+  app.get('/api/export-csv', async (req, res) => {
+    try {
+      const q = query(collection(db, 'sensor_data'), orderBy('timestamp', 'desc'), limit(10000));
+      const snap = await getDocs(q);
+      
+      const rows = [
+        ['Timestamp', 'Date', 'Time', 'Temperature (°C)', 'Humidity (%)', 'Status'].join(',')
+      ];
+
+      snap.docs.forEach(docSnap => {
+        const d = docSnap.data() as SensorData;
+        const dt = new Date(d.timestamp);
+        const dateStr = dt.toISOString().split('T')[0];
+        const timeStr = dt.toTimeString().split(' ')[0];
+        const isErr = d.sensor_error || (d.temperature === 0 && d.humidity === 0);
+        
+        rows.push([
+          d.timestamp,
+          dateStr,
+          timeStr,
+          d.temperature,
+          d.humidity,
+          isErr ? 'SENSOR_FAULT' : 'OK'
+        ].join(','));
+      });
+
+      const csvString = '\uFEFF' + rows.join('\n');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="sensor_backup_${new Date().toISOString().slice(0,10)}.csv"`);
+      res.status(200).send(csvString);
+    } catch (err) {
+      console.error('Error generating CSV export:', err);
+      res.status(500).send('Error generating CSV export');
+    }
+  });
+
+  // API Route: Send LINE CSV Backup Notification On-Demand
+  app.post('/api/send-line-backup', async (req, res) => {
+    try {
+      await loadSettings();
+      const cleanToken = (activeSettings.lineToken || '').trim();
+      const cleanUserId = (activeSettings.lineUserId || '').trim();
+
+      if (!cleanToken || !cleanUserId) {
+        res.status(400).json({ error: 'LINE Token or User ID is not configured' });
+        return;
+      }
+
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'sensor-five-liard.vercel.app';
+      const proto = req.headers['x-forwarded-proto'] || 'https';
+      const downloadUrl = `${proto}://${host}/api/export-csv`;
+
+      const q = query(collection(db, 'sensor_data'), orderBy('timestamp', 'desc'), limit(10000));
+      const snap = await getDocs(q);
+
+      const msg = `📁 [ส่งไฟล์สำรองข้อมูล CSV เข้า LINE]\n\n📊 จำนวนข้อมูลทั้งหมด: ${snap.size} รายการ\n\n📥 คุณสามารถกดที่ลิงก์ด้านล่างเพื่อดาวน์โหลดไฟล์ CSV (เปิดดูใน Excel) เก็บไว้ได้เลยครับ:\n\n🔗 ${downloadUrl}`;
+
+      await axios.post('https://api.line.me/v2/bot/message/push', {
+        to: cleanUserId,
+        messages: [{ type: 'text', text: msg }]
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${cleanToken}`
+        }
+      });
+
+      res.json({ success: true, message: 'ส่งลิงก์สำรองข้อมูลเข้า LINE เรียบร้อยแล้ว' });
+    } catch (err: any) {
+      console.error('Error sending LINE backup:', err?.response?.data || err?.message || err);
+      res.status(500).json({ error: 'Failed to send backup to LINE' });
+    }
+  });
+
+  // API Route: Backup & Clean Data older than 1 year (365 days)
+  app.post('/api/cleanup-old-data', async (req, res) => {
+    try {
+      await loadSettings();
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'sensor-five-liard.vercel.app';
+      const proto = req.headers['x-forwarded-proto'] || 'https';
+      const downloadUrl = `${proto}://${host}/api/export-csv`;
+
+      const cleanToken = (activeSettings.lineToken || '').trim();
+      const cleanUserId = (activeSettings.lineUserId || '').trim();
+
+      // Cutoff time: 365 days ago
+      const days = Number(req.body?.days || 365);
+      const cutoffMs = Date.now() - (days * 24 * 60 * 60 * 1000);
+
+      const qOld = query(collection(db, 'sensor_data'), where('timestamp', '<', cutoffMs), limit(500));
+      const oldSnap = await getDocs(qOld);
+
+      const countToDelete = oldSnap.docs.length;
+
+      // 1. Send Backup link to LINE before deleting
+      if (cleanToken && cleanUserId) {
+        const backupNoticeMsg = `🧹 [ระบบสำรอง & ล้างข้อมูลย้อนหลัง ${days} วัน]\n\nพบข้อมูลเก่าเกิน ${days} วัน จำนวน: ${countToDelete} รายการ\n\n📥 ระบบได้ส่งลิงก์สำรองข้อมูลไฟล์ CSV ให้เก็บไว้ก่อนลบแล้วครับ:\n🔗 ${downloadUrl}\n\n✅ ดำเนินการลบข้อมูลเก่าเพื่อคืนพื้นที่เรียบร้อยแล้ว`;
+        
+        await axios.post('https://api.line.me/v2/bot/message/push', {
+          to: cleanUserId,
+          messages: [{ type: 'text', text: backupNoticeMsg }]
+        }, {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${cleanToken}`
+          }
+        }).catch(e => console.error('Failed to notify LINE before cleanup:', e));
+      }
+
+      // 2. Perform deletion
+      const deletePromises = oldSnap.docs.map(docSnap => deleteDoc(doc(db, 'sensor_data', docSnap.id)));
+      await Promise.all(deletePromises);
+
+      res.json({ success: true, deletedCount: countToDelete, message: `ล้างข้อมูลเก่ากว่า ${days} วัน เรียบร้อยแล้วจำนวน ${countToDelete} รายการ` });
+    } catch (err: any) {
+      console.error('Error in cleanup-old-data:', err);
+      res.status(500).json({ error: 'Failed to cleanup old data' });
+    }
+  });
+
   // API Route: LINE Webhook (Auto-capture Group ID / User ID & Reply Commands)
   app.post('/api/line-webhook', async (req, res) => {
     try {
@@ -181,6 +302,15 @@ async function startServer() {
               msgText.includes('ความชื้น') ||
               msgText === 'c';
 
+            const isBackupCommand = 
+              msgText.includes('backup') || 
+              msgText.includes('csv') || 
+              msgText.includes('export') || 
+              msgText.includes('ดาวน์โหลด') || 
+              msgText.includes('สำรอง') || 
+              msgText.includes('ส่งไฟล์') || 
+              msgText.includes('ขอไฟล์');
+
             if (isCheckCommand) {
               try {
                 // Fetch latest sensor data
@@ -213,11 +343,35 @@ async function startServer() {
                     }
                   });
                   console.log('Successfully replied to LINE command:', msgText);
-                } else {
-                  console.warn('Cannot reply: cleanToken is empty or missing replyToken');
                 }
               } catch (err: any) {
                 console.error('Error replying to check command:', err?.response?.data || err?.message || err);
+              }
+            } else if (isBackupCommand) {
+              try {
+                const host = req.headers['x-forwarded-host'] || req.headers.host || 'sensor-five-liard.vercel.app';
+                const proto = req.headers['x-forwarded-proto'] || 'https';
+                const downloadUrl = `${proto}://${host}/api/export-csv`;
+
+                const qCount = query(collection(db, 'sensor_data'), orderBy('timestamp', 'desc'), limit(10000));
+                const snapCount = await getDocs(qCount);
+
+                const replyText = `📁 [ส่งไฟล์สำรองข้อมูล CSV]\n\n📊 จำนวนข้อมูลทั้งหมดในระบบ: ${snapCount.size} รายการ\n\n📥 สามารถกดลิงก์ด้านล่างเพื่อดาวน์โหลดไฟล์ CSV สำหรับเปิดดูใน Excel ได้เลยครับ:\n\n🔗 ${downloadUrl}`;
+
+                if (cleanToken && event.replyToken) {
+                  await axios.post('https://api.line.me/v2/bot/message/reply', {
+                    replyToken: event.replyToken,
+                    messages: [{ type: 'text', text: replyText }]
+                  }, {
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${cleanToken}`
+                    }
+                  });
+                  console.log('Successfully sent CSV backup link to LINE for command:', msgText);
+                }
+              } catch (err: any) {
+                console.error('Error replying to backup command:', err?.response?.data || err?.message || err);
               }
             }
           }
