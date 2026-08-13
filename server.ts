@@ -67,14 +67,19 @@ async function checkAndSendAlert(data: SensorData) {
   if (now - lastAlertTime < ALERT_COOLDOWN_MS) return; // Prevent spam
 
   const isErr = data.sensor_error || (data.temperature === 0 && data.humidity === 0);
+  const isTempHigh = data.temperature > activeSettings.maxTemp;
+  const isHumHigh = data.humidity > activeSettings.maxHum;
+
   let alertMessage = '';
 
   if (isErr) {
     alertMessage = '⚠️ [แจ้งเตือน] เซนเซอร์มีปัญหา (Sensor Error)\n💡 คำแนะนำ: กรุณาตรวจสอบสายเชื่อมต่อ หรือรีสตาร์ทอุปกรณ์ครับ';
-  } else if (data.temperature > activeSettings.maxTemp) {
-    alertMessage = `🔥 [แจ้งเตือน] อุณหภูมิสูงเกินกำหนด!\n🌡️ อุณหภูมิปัจจุบัน: ${data.temperature.toFixed(1)}°C (ตั้งไว้: ${activeSettings.maxTemp}°C)\n💡 คำแนะนำ: ควรเปิดพัดลมระบายอากาศ, เปิดเครื่องปรับอากาศ หรือเปิดหน้าต่างเพื่อลดอุณหภูมิครับ`;
-  } else if (data.humidity > activeSettings.maxHum) {
-    alertMessage = `💧 [แจ้งเตือน] ความชื้นสูงเกินกำหนด!\n💦 ความชื้นปัจจุบัน: ${data.humidity.toFixed(1)}% (ตั้งไว้: ${activeSettings.maxHum}%)\n💡 คำแนะนำ: ควรเปิดพัดลมดูดอากาศ หรือใช้เครื่องดูดความชื้น เพื่อป้องกันเชื้อราครับ`;
+  } else if (isTempHigh && isHumHigh) {
+    alertMessage = `🚨 [แจ้งเตือน] อุณหภูมิและความชื้นสูงเกินกำหนดทั้งคู่!\n\n🌡️ อุณหภูมิปัจจุบัน: ${data.temperature.toFixed(1)}°C (เกณฑ์สูงสุด: ${activeSettings.maxTemp}°C)\n💦 ความชื้นปัจจุบัน: ${data.humidity.toFixed(1)}% (เกณฑ์สูงสุด: ${activeSettings.maxHum}%)\n\n💡 คำแนะนำ: ควรเปิดระบบระบายอากาศ และเปิดเครื่องดูดความชื้นครับ`;
+  } else if (isTempHigh) {
+    alertMessage = `🔥 [แจ้งเตือน] อุณหภูมิสูงเกินกำหนด!\n\n🌡️ อุณหภูมิปัจจุบัน: ${data.temperature.toFixed(1)}°C (เกณฑ์สูงสุด: ${activeSettings.maxTemp}°C)\n💦 ความชื้นปัจจุบัน: ${data.humidity.toFixed(1)}%\n\n💡 คำแนะนำ: ควรเปิดพัดลมระบายอากาศ หรือเปิดเครื่องปรับอากาศเพื่อลดอุณหภูมิครับ`;
+  } else if (isHumHigh) {
+    alertMessage = `💧 [แจ้งเตือน] ความชื้นสูงเกินกำหนด!\n\n🌡️ อุณหภูมิปัจจุบัน: ${data.temperature.toFixed(1)}°C\n💦 ความชื้นปัจจุบัน: ${data.humidity.toFixed(1)}% (เกณฑ์สูงสุด: ${activeSettings.maxHum}%)\n\n💡 คำแนะนำ: ควรเปิดพัดลมดูดอากาศ หรือใช้เครื่องดูดความชื้นครับ`;
   }
 
   if (alertMessage) {
