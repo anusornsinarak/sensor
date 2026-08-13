@@ -61,6 +61,9 @@ const loadSettings = async () => {
 loadSettings();
 
 async function checkAndSendAlert(data: SensorData) {
+  if (!activeSettings.lineToken) {
+    await loadSettings();
+  }
   if (!activeSettings.lineNotifyEnabled || !activeSettings.lineToken || !activeSettings.lineUserId) return;
   
   const now = Date.now();
@@ -114,88 +117,94 @@ async function startServer() {
     res.json(activeSettings);
   });
 
-  // API Route: LINE Webhook (Auto-capture Group ID)
+  // API Route: LINE Webhook (Auto-capture Group ID & Reply Commands)
   app.post('/api/line-webhook', async (req, res) => {
-    res.status(200).send('OK'); // Always respond 200 OK to LINE immediately
-    
-    let body = req.body;
-    if (typeof body === 'string') {
-      try { body = JSON.parse(body); } catch(e) {}
-    }
-    
-    if (body.events && Array.isArray(body.events)) {
-      for (const event of body.events) {
-        // Auto-save the Group ID if added to a group
-        if (event.source && event.source.type === 'group' && event.source.groupId) {
-          const groupId = event.source.groupId;
-          
-          if (activeSettings.lineUserId !== groupId) {
-            activeSettings.lineUserId = groupId;
-            activeSettings.updatedAt = Date.now();
+    try {
+      await loadSettings();
+
+      let body = req.body;
+      if (typeof body === 'string') {
+        try { body = JSON.parse(body); } catch(e) {}
+      }
+      
+      if (body && body.events && Array.isArray(body.events)) {
+        for (const event of body.events) {
+          // Auto-save the Group ID if added to a group
+          if (event.source && event.source.type === 'group' && event.source.groupId) {
+            const groupId = event.source.groupId;
             
-            try {
-              await setDoc(doc(db, 'config', 'settings'), activeSettings, { merge: true });
-              console.log('Successfully auto-captured LINE Group ID:', groupId);
+            if (activeSettings.lineUserId !== groupId) {
+              activeSettings.lineUserId = groupId;
+              activeSettings.updatedAt = Date.now();
               
-              if (activeSettings.lineToken) {
-                await axios.post('https://api.line.me/v2/bot/message/push', {
-                  to: groupId,
-                  messages: [{ type: 'text', text: '🟢 สวัสดีครับ! ระบบ Dashboard เชื่อมต่อกับกลุ่มนี้สำเร็จแล้ว\n\nระบบจะส่งการแจ้งเตือนค่าเซนเซอร์ที่นี่ครับ 📊' }]
-                }, {
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${activeSettings.lineToken}`
-                  }
-                });
+              try {
+                await setDoc(doc(db, 'device_settings', 'config'), activeSettings, { merge: true });
+                console.log('Successfully auto-captured LINE Group ID:', groupId);
+                
+                if (activeSettings.lineToken) {
+                  await axios.post('https://api.line.me/v2/bot/message/push', {
+                    to: groupId,
+                    messages: [{ type: 'text', text: '🟢 สวัสดีครับ! ระบบ Dashboard เชื่อมต่อกับกลุ่มนี้สำเร็จแล้ว\n\nระบบจะส่งการแจ้งเตือนค่าเซนเซอร์ที่นี่ครับ 📊' }]
+                  }, {
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${activeSettings.lineToken}`
+                    }
+                  });
+                }
+              } catch (err) {
+                console.error('Error saving or replying to LINE Group:', err);
               }
-            } catch (err) {
-              console.error('Error saving or replying to LINE Group:', err);
             }
           }
-        }
 
-        // Handle text messages for "check" command
-        if (event.type === 'message' && event.message && event.message.type === 'text') {
-          const msgText = event.message.text.trim().toLowerCase();
-          if (msgText === 'check') {
-            try {
-              // Fetch latest sensor data
-              const qLatest = query(collection(db, 'sensor_data'), orderBy('timestamp', 'desc'), limit(1));
-              const snap = await getDocs(qLatest);
-              
-              let replyText = '';
-              if (!snap.empty) {
-                const latestData = snap.docs[0].data() as SensorData;
-                const isErr = latestData.sensor_error || (latestData.temperature === 0 && latestData.humidity === 0);
+          // Handle text messages for "check", "เช็ค", "status", "สถานะ"
+          if (event.type === 'message' && event.message && event.message.type === 'text') {
+            const msgText = event.message.text.trim().toLowerCase();
+            if (msgText === 'check' || msgText === 'เช็ค' || msgText === 'status' || msgText === 'สถานะ') {
+              try {
+                // Fetch latest sensor data
+                const qLatest = query(collection(db, 'sensor_data'), orderBy('timestamp', 'desc'), limit(1));
+                const snap = await getDocs(qLatest);
                 
-                if (isErr) {
-                  replyText = '⚠️ สถานะปัจจุบัน: เซนเซอร์มีปัญหา (Sensor Error)\n💡 คำแนะนำ: กรุณาตรวจสอบสายเชื่อมต่อ หรือรีสตาร์ทอุปกรณ์ครับ';
-                } else {
-                  replyText = `📊 สถานะปัจจุบัน:\n🌡️ อุณหภูมิ: ${latestData.temperature.toFixed(1)}°C\n💦 ความชื้น: ${latestData.humidity.toFixed(1)}%`;
-                }
-              } else {
-                replyText = '❌ ยังไม่มีข้อมูลเซนเซอร์ในระบบครับ';
-              }
-
-              // Reply back using the replyToken
-              if (activeSettings.lineToken && event.replyToken) {
-                await axios.post('https://api.line.me/v2/bot/message/reply', {
-                  replyToken: event.replyToken,
-                  messages: [{ type: 'text', text: replyText }]
-                }, {
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${activeSettings.lineToken}`
+                let replyText = '';
+                if (!snap.empty) {
+                  const latestData = snap.docs[0].data() as SensorData;
+                  const isErr = latestData.sensor_error || (latestData.temperature === 0 && latestData.humidity === 0);
+                  
+                  if (isErr) {
+                    replyText = '⚠️ สถานะปัจจุบัน: เซนเซอร์มีปัญหา (Sensor Error)\n💡 คำแนะนำ: กรุณาตรวจสอบสายเชื่อมต่อ หรือรีสตาร์ทอุปกรณ์ครับ';
+                  } else {
+                    replyText = `📊 สถานะปัจจุบัน:\n🌡️ อุณหภูมิ: ${latestData.temperature.toFixed(1)}°C\n💦 ความชื้น: ${latestData.humidity.toFixed(1)}%`;
                   }
-                });
+                } else {
+                  replyText = '❌ ยังไม่มีข้อมูลเซนเซอร์ในระบบครับ';
+                }
+
+                // Reply back using the replyToken
+                if (activeSettings.lineToken && event.replyToken) {
+                  await axios.post('https://api.line.me/v2/bot/message/reply', {
+                    replyToken: event.replyToken,
+                    messages: [{ type: 'text', text: replyText }]
+                  }, {
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${activeSettings.lineToken}`
+                    }
+                  });
+                }
+              } catch (err) {
+                console.error('Error replying to check command:', err);
               }
-            } catch (err) {
-              console.error('Error replying to check command:', err);
             }
           }
         }
       }
+    } catch (e) {
+      console.error('Webhook error:', e);
     }
+
+    res.status(200).send('OK');
   });
 
   // API Route: Update device settings (from Web App)
