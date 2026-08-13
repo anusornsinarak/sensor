@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, query, orderBy, limit, onSnapshot, setDoc, getDocs, where } from 'firebase/firestore';
+import { getFirestore, collection, doc, query, orderBy, limit, onSnapshot, setDoc, getDocs, where, QueryConstraint } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 // Initialize Firebase
@@ -37,7 +37,10 @@ interface DeviceSettings {
 
 export default function App() {
   const [data, setData] = useState<SensorData[]>([]);
-  const [timeRange, setTimeRange] = useState<'1H' | '24H' | '7D' | 'CUSTOM'>('1H');
+  type TimeRangeOption = '1H' | '3H' | '6H' | '12H' | '24H' | '7D' | 'CUSTOM';
+  const [timeRange, setTimeRange] = useState<TimeRangeOption>('1H');
+  const [filterStartTime, setFilterStartTime] = useState<string>('');
+  const [filterEndTime, setFilterEndTime] = useState<string>('');
   const [customStart, setCustomStart] = useState<string>('');
   const [customEnd, setCustomEnd] = useState<string>('');
   const [showExportModal, setShowExportModal] = useState(false);
@@ -45,6 +48,30 @@ export default function App() {
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [isUpdatingConfig, setIsUpdatingConfig] = useState(false);
+
+  // Quick preset helper for intraday time periods
+  const handleSelectIntradayPreset = (preset: 'today' | 'morning' | 'afternoon' | 'evening') => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+
+    if (preset === 'today') {
+      setFilterStartTime(`${dateStr}T00:00`);
+      setFilterEndTime(`${dateStr}T23:59`);
+    } else if (preset === 'morning') {
+      setFilterStartTime(`${dateStr}T06:00`);
+      setFilterEndTime(`${dateStr}T12:00`);
+    } else if (preset === 'afternoon') {
+      setFilterStartTime(`${dateStr}T12:00`);
+      setFilterEndTime(`${dateStr}T18:00`);
+    } else if (preset === 'evening') {
+      setFilterStartTime(`${dateStr}T18:00`);
+      setFilterEndTime(`${dateStr}T23:59`);
+    }
+    setTimeRange('CUSTOM');
+  };
 
   // Device settings & thresholds
   const [settings, setSettings] = useState<DeviceSettings>({
@@ -67,11 +94,35 @@ export default function App() {
   const handleRefreshData = async () => {
     setIsRefreshing(true);
     try {
-      const q = query(
-        collection(db, 'sensor_data'),
-        orderBy('timestamp', 'desc'),
-        limit(1000)
-      );
+      const constraints: QueryConstraint[] = [];
+      let startMs: number | null = null;
+      let endMs: number | null = null;
+      const now = Date.now();
+
+      if (timeRange === '1H') startMs = now - 1 * 3600 * 1000;
+      else if (timeRange === '3H') startMs = now - 3 * 3600 * 1000;
+      else if (timeRange === '6H') startMs = now - 6 * 3600 * 1000;
+      else if (timeRange === '12H') startMs = now - 12 * 3600 * 1000;
+      else if (timeRange === '24H') startMs = now - 24 * 3600 * 1000;
+      else if (timeRange === '7D') startMs = now - 7 * 24 * 3600 * 1000;
+      else if (timeRange === 'CUSTOM') {
+        if (filterStartTime) {
+          const p = new Date(filterStartTime).getTime();
+          if (!isNaN(p)) startMs = p;
+        }
+        if (filterEndTime) {
+          const p = new Date(filterEndTime).getTime();
+          if (!isNaN(p)) endMs = p;
+        }
+      }
+
+      if (startMs !== null) constraints.push(where('timestamp', '>=', startMs));
+      if (endMs !== null) constraints.push(where('timestamp', '<=', endMs));
+
+      constraints.push(orderBy('timestamp', 'desc'));
+      constraints.push(limit(5000));
+
+      const q = query(collection(db, 'sensor_data'), ...constraints);
       const snapshot = await getDocs(q);
       const sensorReadings = snapshot.docs.map(doc => ({
         id: doc.id,
@@ -82,7 +133,7 @@ export default function App() {
       setLastPacketReceivedClientTime(Date.now());
       const lastRec = sensorReadings.length > 0 ? sensorReadings[sensorReadings.length - 1] : null;
       const timeStr = lastRec ? format(new Date(lastRec.timestamp), 'HH:mm:ss') : '-';
-      setRefreshToast(`ดึงข้อมูลล่าสุดสำเร็จ (บันทึกล่าสุดเวลา ${timeStr})`);
+      setRefreshToast(`ดึงข้อมูลช่วงเวลาที่เลือกสำเร็จ (มีทั้งหมด ${sensorReadings.length} รายการ, ล่าสุด ${timeStr})`);
       setTimeout(() => setRefreshToast(null), 3500);
     } catch (err) {
       console.error("Error refreshing sensor data:", err);
@@ -153,31 +204,84 @@ export default function App() {
     }
   };
 
-  // 1. Fetch real-time sensor data from Firestore
+  const [realtimeLatestData, setRealtimeLatestData] = useState<SensorData | null>(null);
+
+  // 1. Always listen to the absolute latest single packet for Current Status Card & Alerts
   useEffect(() => {
-    const q = query(
+    const qLatest = query(
       collection(db, 'sensor_data'),
       orderBy('timestamp', 'desc'),
-      limit(1000)
+      limit(1)
     );
+
+    const unsubscribe = onSnapshot(qLatest, (snapshot) => {
+      if (!snapshot.empty) {
+        const docSnap = snapshot.docs[0];
+        const latestDoc = { id: docSnap.id, ...docSnap.data() } as SensorData;
+        setRealtimeLatestData(latestDoc);
+        setLastPacketReceivedClientTime(Date.now());
+      }
+    }, (error) => {
+      console.error("Firestore latest doc subscription error:", error);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Dynamic fetch for chart data based on selected time range / custom dates
+  useEffect(() => {
+    const constraints: QueryConstraint[] = [];
+    let startMs: number | null = null;
+    let endMs: number | null = null;
+    const now = Date.now();
+
+    if (timeRange === '1H') startMs = now - 1 * 3600 * 1000;
+    else if (timeRange === '3H') startMs = now - 3 * 3600 * 1000;
+    else if (timeRange === '6H') startMs = now - 6 * 3600 * 1000;
+    else if (timeRange === '12H') startMs = now - 12 * 3600 * 1000;
+    else if (timeRange === '24H') startMs = now - 24 * 3600 * 1000;
+    else if (timeRange === '7D') startMs = now - 7 * 24 * 3600 * 1000;
+    else if (timeRange === 'CUSTOM') {
+      if (filterStartTime) {
+        const p = new Date(filterStartTime).getTime();
+        if (!isNaN(p)) startMs = p;
+      }
+      if (filterEndTime) {
+        const p = new Date(filterEndTime).getTime();
+        if (!isNaN(p)) endMs = p;
+      }
+    }
+
+    if (startMs !== null) {
+      constraints.push(where('timestamp', '>=', startMs));
+    }
+    if (endMs !== null) {
+      constraints.push(where('timestamp', '<=', endMs));
+    }
+
+    constraints.push(orderBy('timestamp', 'desc'));
+    constraints.push(limit(5000));
+
+    const q = query(collection(db, 'sensor_data'), ...constraints);
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const sensorReadings = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
       } as SensorData));
-      
+
+      // Sort ascending for chart display
       sensorReadings.sort((a, b) => a.timestamp - b.timestamp);
       setData(sensorReadings);
       if (sensorReadings.length > 0) {
         setLastPacketReceivedClientTime(Date.now());
       }
     }, (error) => {
-      console.error("Firestore real-time subscription error:", error);
+      console.error("Firestore chart sensor data error:", error);
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [timeRange, filterStartTime, filterEndTime]);
 
   // 2. Fetch & Listen to real-time Device Settings from Firestore
   useEffect(() => {
@@ -289,32 +393,59 @@ export default function App() {
 
   // Filter data based on selected time range
   const filteredData = useMemo(() => {
-    if (timeRange === 'CUSTOM') return data;
+    if (timeRange === 'CUSTOM') {
+      if (!filterStartTime && !filterEndTime) return data;
+      const startMs = filterStartTime ? new Date(filterStartTime).getTime() : 0;
+      const endMs = filterEndTime ? new Date(filterEndTime).getTime() : Infinity;
+      return data.filter(d => d.timestamp >= startMs && d.timestamp <= endMs);
+    }
+
     const now = Date.now();
     let cutoff = now;
     if (timeRange === '1H') cutoff = now - 60 * 60 * 1000;
+    else if (timeRange === '3H') cutoff = now - 3 * 60 * 60 * 1000;
+    else if (timeRange === '6H') cutoff = now - 6 * 60 * 60 * 1000;
+    else if (timeRange === '12H') cutoff = now - 12 * 60 * 60 * 1000;
     else if (timeRange === '24H') cutoff = now - 24 * 60 * 60 * 1000;
     else if (timeRange === '7D') cutoff = now - 7 * 24 * 60 * 60 * 1000;
 
     return data.filter(d => d.timestamp >= cutoff);
-  }, [data, timeRange]);
+  }, [data, timeRange, filterStartTime, filterEndTime]);
 
   // Format data for Recharts with calibration offsets applied
   const chartData = useMemo(() => {
-    return filteredData.map(d => {
+    let isMultiDay = timeRange === '7D';
+    if (filteredData.length >= 2) {
+      const minTs = filteredData[0].timestamp;
+      const maxTs = filteredData[filteredData.length - 1].timestamp;
+      if (maxTs - minTs > 24 * 60 * 60 * 1000) {
+        isMultiDay = true;
+      }
+    }
+
+    // Downsample chart data points if dataset is large for smooth rendering
+    let displayPoints = filteredData;
+    if (filteredData.length > 800) {
+      const step = Math.ceil(filteredData.length / 800);
+      displayPoints = filteredData.filter((_, idx) => idx % step === 0 || idx === filteredData.length - 1);
+    }
+
+    return displayPoints.map(d => {
       const isErr = Boolean(d.sensor_error) || (d.temperature === 0 && d.humidity === 0);
       const calibratedTemp = isErr ? 0 : Number((d.temperature + (settings.tempOffset || 0)).toFixed(1));
       const calibratedHum = isErr ? 0 : Number((d.humidity + (settings.humOffset || 0)).toFixed(1));
+      const dateObj = new Date(d.timestamp);
       return {
         ...d,
         temperature: calibratedTemp,
         humidity: calibratedHum,
-        timeLabel: format(new Date(d.timestamp), timeRange === '1H' ? 'HH:mm' : 'MMM dd, HH:mm'),
+        timeLabel: format(dateObj, isMultiDay ? 'dd/MM HH:mm' : 'HH:mm'),
+        fullTimeLabel: format(dateObj, 'yyyy-MM-dd HH:mm:ss'),
       };
     });
   }, [filteredData, timeRange, settings.tempOffset, settings.humOffset]);
 
-  const rawLatestData = data.length > 0 ? data[data.length - 1] : null;
+  const rawLatestData = realtimeLatestData || (data.length > 0 ? data[data.length - 1] : null);
 
   // Calibrated latest sensor reading
   const latestData = useMemo(() => {
@@ -2216,7 +2347,108 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                 <Code className="w-3.5 h-3.5" /> โค้ด ESP32
               </button>
             </div>
+          </div>
 
+          {/* Chart Time Filter Control Bar */}
+          <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm flex flex-col gap-3 shrink-0">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-blue-600" />
+                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">เลือกช่วงเวลาแสดงผลกราฟ (Time Range Filter):</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                {([
+                  { id: '1H', label: '1 ชม.' },
+                  { id: '3H', label: '3 ชม.' },
+                  { id: '6H', label: '6 ชม.' },
+                  { id: '12H', label: '12 ชม.' },
+                  { id: '24H', label: '24 ชม. (ทั้งวัน)' },
+                  { id: '7D', label: '7 วัน' },
+                  { id: 'CUSTOM', label: '🎯 เลือกช่วงเวลาเฉพาะ' },
+                ] as const).map(opt => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setTimeRange(opt.id)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      timeRange === opt.id
+                        ? 'bg-blue-600 text-white shadow-sm ring-2 ring-blue-300'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Custom Time Selector Panel */}
+            {timeRange === 'CUSTOM' && (
+              <div className="pt-2.5 border-t border-slate-100 space-y-2.5 text-xs animate-in fade-in">
+                <div className="flex flex-wrap items-center justify-between gap-2 bg-blue-50/50 p-2.5 rounded-xl border border-blue-100">
+                  <span className="font-semibold text-blue-900 flex items-center gap-1">
+                    ⚡ เลือกปุ่มลัดช่วงเวลาในวัน:
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => handleSelectIntradayPreset('today')}
+                      className="px-2.5 py-1 bg-white hover:bg-blue-50 border border-blue-200 rounded-lg text-[11px] font-bold text-blue-800 cursor-pointer"
+                    >
+                      📅 วันนี้ทั้งวัน (00:00 - 23:59)
+                    </button>
+                    <button
+                      onClick={() => handleSelectIntradayPreset('morning')}
+                      className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg text-[11px] font-bold text-amber-800 cursor-pointer"
+                    >
+                      ☀️ ช่วงเช้า (06:00 - 12:00)
+                    </button>
+                    <button
+                      onClick={() => handleSelectIntradayPreset('afternoon')}
+                      className="px-2.5 py-1 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg text-[11px] font-bold text-orange-800 cursor-pointer"
+                    >
+                      🌤️ ช่วงบ่าย (12:00 - 18:00)
+                    </button>
+                    <button
+                      onClick={() => handleSelectIntradayPreset('evening')}
+                      className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg text-[11px] font-bold text-indigo-800 cursor-pointer"
+                    >
+                      🌙 ช่วงค่ำ (18:00 - 24:00)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-600 font-semibold">เวลาเริ่มต้น:</span>
+                    <input 
+                      type="datetime-local" 
+                      value={filterStartTime} 
+                      onChange={(e) => setFilterStartTime(e.target.value)}
+                      className="px-2.5 py-1 bg-white border border-slate-300 rounded-lg text-xs font-mono font-medium outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-600 font-semibold">เวลาสิ้นสุด:</span>
+                    <input 
+                      type="datetime-local" 
+                      value={filterEndTime} 
+                      onChange={(e) => setFilterEndTime(e.target.value)}
+                      className="px-2.5 py-1 bg-white border border-slate-300 rounded-lg text-xs font-mono font-medium outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  {(filterStartTime || filterEndTime) && (
+                    <button
+                      onClick={() => { setFilterStartTime(''); setFilterEndTime(''); }}
+                      className="px-3 py-1 bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 rounded-lg text-xs font-bold cursor-pointer"
+                    >
+                      ล้างช่วงเวลา
+                    </button>
+                  )}
+                  <div className="text-[11px] text-slate-500 ml-auto">
+                    กำลังแสดงผล: <span className="font-bold text-blue-600">{chartData.length}</span> จุดข้อมูล
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Temperature Chart */}
@@ -2224,21 +2456,14 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
             <div className="flex flex-wrap items-center justify-between mb-4 gap-4 shrink-0">
               <div className="flex items-center gap-3">
                 <h3 className="text-base sm:text-lg font-bold">กราฟอุณหภูมิ (°C)</h3>
-                <div className="flex gap-1 text-[10px]">
-                  {(['1H', '24H', '7D'] as const).map(range => (
-                    <button
-                      key={`temp-${range}`}
-                      onClick={() => setTimeRange(range)}
-                      className={`px-2 py-1 rounded transition-colors ${
-                        timeRange === range 
-                          ? 'bg-blue-600 text-white font-medium' 
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                      }`}
-                    >
-                      {range}
-                    </button>
-                  ))}
-                </div>
+                <span className="text-xs font-semibold px-2 py-0.5 bg-blue-50 text-blue-700 rounded-md border border-blue-100">
+                  {timeRange === '1H' ? '1 ชั่วโมงล่าสุด' :
+                   timeRange === '3H' ? '3 ชั่วโมงล่าสุด' :
+                   timeRange === '6H' ? '6 ชั่วโมงล่าสุด' :
+                   timeRange === '12H' ? '12 ชั่วโมงล่าสุด' :
+                   timeRange === '24H' ? '24 ชั่วโมง (ทั้งวัน)' :
+                   timeRange === '7D' ? '7 วันล่าสุด' : 'กำหนดช่วงเวลาเฉพาะ'}
+                </span>
               </div>
               <div className="text-xs text-slate-400 font-medium hidden sm:block">ขีดจำกัดแจ้งเตือน: <span className="text-red-500">{'>'} {settings.maxTemp}°C</span></div>
             </div>
@@ -2253,6 +2478,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                       fontSize={11} 
                       tickMargin={8} 
                       tick={{fill: '#94a3b8'}}
+                      minTickGap={25}
                     />
                     <YAxis 
                       stroke="#94a3b8" 
@@ -2262,7 +2488,13 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                     />
                     <Tooltip 
                       contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                      labelStyle={{ color: '#64748b', marginBottom: '4px', fontSize: '12px' }}
+                      labelStyle={{ color: '#64748b', marginBottom: '4px', fontSize: '12px', fontWeight: 600 }}
+                      labelFormatter={(label, payload) => {
+                        if (payload && payload[0] && payload[0].payload && payload[0].payload.fullTimeLabel) {
+                          return `เวลา: ${payload[0].payload.fullTimeLabel}`;
+                        }
+                        return label;
+                      }}
                       itemStyle={{ fontSize: '14px', fontWeight: 500 }}
                     />
                     <ReferenceLine y={settings.maxTemp} stroke="#ef4444" strokeDasharray="4 4" opacity={0.5} />
@@ -2288,21 +2520,14 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
             <div className="flex flex-wrap items-center justify-between mb-4 gap-4 shrink-0">
               <div className="flex items-center gap-3">
                 <h3 className="text-base sm:text-lg font-bold">กราฟความชื้น (%)</h3>
-                <div className="flex gap-1 text-[10px]">
-                  {(['1H', '24H', '7D'] as const).map(range => (
-                    <button
-                      key={`hum-${range}`}
-                      onClick={() => setTimeRange(range)}
-                      className={`px-2 py-1 rounded transition-colors ${
-                        timeRange === range 
-                          ? 'bg-teal-600 text-white font-medium' 
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                      }`}
-                    >
-                      {range}
-                    </button>
-                  ))}
-                </div>
+                <span className="text-xs font-semibold px-2 py-0.5 bg-teal-50 text-teal-700 rounded-md border border-teal-100">
+                  {timeRange === '1H' ? '1 ชั่วโมงล่าสุด' :
+                   timeRange === '3H' ? '3 ชั่วโมงล่าสุด' :
+                   timeRange === '6H' ? '6 ชั่วโมงล่าสุด' :
+                   timeRange === '12H' ? '12 ชั่วโมงล่าสุด' :
+                   timeRange === '24H' ? '24 ชั่วโมง (ทั้งวัน)' :
+                   timeRange === '7D' ? '7 วันล่าสุด' : 'กำหนดช่วงเวลาเฉพาะ'}
+                </span>
               </div>
               <div className="text-xs text-slate-400 font-medium hidden sm:block">ขีดจำกัดแจ้งเตือน: <span className="text-red-500">{'>'} {settings.maxHum}%</span></div>
             </div>
@@ -2317,6 +2542,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                       fontSize={11} 
                       tickMargin={8} 
                       tick={{fill: '#94a3b8'}}
+                      minTickGap={25}
                     />
                     <YAxis 
                       stroke="#94a3b8" 
@@ -2326,7 +2552,13 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                     />
                     <Tooltip 
                       contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                      labelStyle={{ color: '#64748b', marginBottom: '4px', fontSize: '12px' }}
+                      labelStyle={{ color: '#64748b', marginBottom: '4px', fontSize: '12px', fontWeight: 600 }}
+                      labelFormatter={(label, payload) => {
+                        if (payload && payload[0] && payload[0].payload && payload[0].payload.fullTimeLabel) {
+                          return `เวลา: ${payload[0].payload.fullTimeLabel}`;
+                        }
+                        return label;
+                      }}
                       itemStyle={{ fontSize: '14px', fontWeight: 500 }}
                     />
                     <ReferenceLine y={settings.maxHum} stroke="#ef4444" strokeDasharray="4 4" opacity={0.5} />
