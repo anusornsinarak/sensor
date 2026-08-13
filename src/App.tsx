@@ -1960,19 +1960,46 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
 
               </div>
               
-              <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-bold text-slate-700">ล้างประวัติข้อมูลเก่า</p>
-                  <p className="text-[11px] text-slate-500">ลบข้อมูลทดสอบใน Firestore เพื่อเริ่มนับใหม่</p>
+              <div className="mt-5 pt-4 border-t border-slate-200 space-y-3">
+                {/* Save & Status Footer */}
+                <div className="flex items-center justify-between gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold">
+                    {isUpdatingConfig ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-blue-600" />
+                        <span className="text-blue-600">กำลังบันทึกลงฐานข้อมูล Firestore...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                        <span className="text-emerald-700">ระบบบันทึกค่าให้อัตโนมัติ (Auto-Saved)</span>
+                      </>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setShowSettings(false)}
+                    className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs sm:text-sm shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>บันทึก & ปิดหน้าต่าง</span>
+                  </button>
                 </div>
-                <button
-                  onClick={handleClearHistory}
-                  disabled={isClearingData}
-                  className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>{isClearingData ? 'กำลังล้าง...' : 'ล้างประวัติเก่า'}</span>
-                </button>
+
+                {/* Clear History */}
+                <div className="pt-2 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-bold text-slate-700">ล้างประวัติข้อมูลเก่า</p>
+                    <p className="text-[11px] text-slate-500">ลบข้อมูลทดสอบใน Firestore เพื่อเริ่มนับใหม่</p>
+                  </div>
+                  <button
+                    onClick={handleClearHistory}
+                    disabled={isClearingData}
+                    className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>{isClearingData ? 'กำลังล้าง...' : 'ล้างประวัติเก่า'}</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
