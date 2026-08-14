@@ -11,6 +11,7 @@ import { format } from 'date-fns';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, doc, query, orderBy, limit, onSnapshot, setDoc, getDocs, where, QueryConstraint } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
+import { getEsp32Firmware } from './esp32Firmware';
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
@@ -24,6 +25,18 @@ export const ROOM_STANDARDS = {
   baby_room: { name: 'ห้องเด็กอ่อน (Baby)', tempMin: 22, tempMax: 24, humMin: 40, humMax: 60, desc: 'ควบคุมอุณหภูมิคงที่' },
 };
 type RoomType = keyof typeof ROOM_STANDARDS;
+
+export const WEATHER_LOCATIONS = [
+  { id: 'prachinburi', name: 'ปราจีนบุรี (Prachinburi)', lat: 14.0509, lon: 101.3716 },
+  { id: 'bangkok', name: 'กรุงเทพมหานคร (Bangkok)', lat: 13.7563, lon: 100.5018 },
+  { id: 'chonburi', name: 'ชลบุรี (Chonburi)', lat: 13.3611, lon: 100.9847 },
+  { id: 'rayong', name: 'ระยอง (Rayong)', lat: 12.6815, lon: 101.2816 },
+  { id: 'chiangmai', name: 'เชียงใหม่ (Chiang Mai)', lat: 18.7883, lon: 98.9853 },
+  { id: 'khonkaen', name: 'ขอนแก่น (Khon Kaen)', lat: 16.4322, lon: 102.8236 },
+  { id: 'korat', name: 'นครราชสีมา (Korat)', lat: 14.9799, lon: 102.0978 },
+  { id: 'phuket', name: 'ภูเก็ต (Phuket)', lat: 7.8804, lon: 98.3923 },
+  { id: 'songkhla', name: 'สงขลา / หาดใหญ่ (Songkhla)', lat: 7.0084, lon: 100.4767 },
+];
 
 interface OutdoorWeather {
   temp: number;
@@ -51,6 +64,11 @@ interface DeviceSettings {
   lineNotifyEnabled?: boolean;
   deviceName?: string;
   roomType?: string;
+  weatherLocation?: string;
+  weatherLat?: number;
+  weatherLon?: number;
+  lcdLine1?: string;
+  lcdLine2?: string;
   updatedAt?: number;
 }
 
@@ -94,18 +112,47 @@ export default function App() {
     setTimeRange('CUSTOM');
   };
 
-  // Device settings & thresholds
-  const [settings, setSettings] = useState<DeviceSettings>({
-    maxTemp: 30,
-    maxHum: 65,
-    sendIntervalSec: 60,
-    tempOffset: 0,
-    humOffset: 0,
-    lineToken: '',
-    lineUserId: '',
-    lineNotifyEnabled: false,
-    deviceName: "Sensor 1",
-    roomType: "general",
+  // Device settings & thresholds with localStorage persistence fallback
+  const [settings, setSettings] = useState<DeviceSettings>(() => {
+    try {
+      const saved = localStorage.getItem('sensor_app_settings');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          maxTemp: 30,
+          maxHum: 65,
+          sendIntervalSec: 60,
+          tempOffset: 0,
+          humOffset: 0,
+          lineToken: '',
+          lineUserId: '',
+          lineNotifyEnabled: false,
+          deviceName: "Sensor 1",
+          roomType: "general",
+          weatherLocation: "ปราจีนบุรี (Prachinburi)",
+          weatherLat: 14.0509,
+          weatherLon: 101.3716,
+          ...parsed
+        };
+      }
+    } catch (e) {
+      console.warn("Failed to load cached settings", e);
+    }
+    return {
+      maxTemp: 30,
+      maxHum: 65,
+      sendIntervalSec: 60,
+      tempOffset: 0,
+      humOffset: 0,
+      lineToken: '',
+      lineUserId: '',
+      lineNotifyEnabled: false,
+      deviceName: "Sensor 1",
+      roomType: "general",
+      weatherLocation: "ปราจีนบุรี (Prachinburi)",
+      weatherLat: 14.0509,
+      weatherLon: 101.3716,
+    };
   });
 
   const [showSettings, setShowSettings] = useState(false);
@@ -306,28 +353,14 @@ export default function App() {
     return () => unsubscribe();
   }, [timeRange, filterStartTime, filterEndTime]);
 
-  // Fetch Outdoor Weather from Open-Meteo
+  // Fetch Outdoor Weather from Open-Meteo (Sync with ESP32 Coordinates)
   useEffect(() => {
     const fetchWeather = async () => {
       setOutdoorLoading(true);
       try {
-        let lat = 13.7563;
-        let lon = 100.5018;
-        let locName = 'กรุงเทพมหานคร';
-
-        try {
-          const geoRes = await fetch('https://ipapi.co/json/');
-          if (geoRes.ok) {
-            const geoData = await geoRes.json();
-            if (geoData.latitude && geoData.longitude) {
-              lat = geoData.latitude;
-              lon = geoData.longitude;
-              locName = geoData.city || locName;
-            }
-          }
-        } catch (e) {
-          console.log('IP Geolocation failed, using default Bangkok coordinates');
-        }
+        const lat = settings.weatherLat ?? 14.0509; // Default: Prachinburi
+        const lon = settings.weatherLon ?? 101.3716;
+        const locName = settings.weatherLocation ?? 'ปราจีนบุรี (Prachinburi)';
 
         const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,weather_code`);
         if (weatherRes.ok) {
@@ -336,7 +369,7 @@ export default function App() {
             temp: weatherData.current.temperature_2m,
             humidity: weatherData.current.relative_humidity_2m,
             weatherCode: weatherData.current.weather_code,
-            locationName: locName
+            locationName: locName.includes('(') ? locName.split('(')[0].trim() : locName
           });
         }
       } catch (e) {
@@ -347,16 +380,22 @@ export default function App() {
     };
 
     fetchWeather();
-    const interval = setInterval(fetchWeather, 15 * 60 * 1000); // refresh every 15 mins
+    const interval = setInterval(fetchWeather, 10 * 60 * 1000); // refresh every 10 mins
     return () => clearInterval(interval);
-  }, []);
+  }, [settings.weatherLat, settings.weatherLon, settings.weatherLocation]);
 
   // 2. Fetch & Listen to real-time Device Settings from Firestore
   useEffect(() => {
     const unsubscribe = onSnapshot(doc(db, 'device_settings', 'config'), (docSnap) => {
       if (docSnap.exists()) {
         const remoteData = docSnap.data() as DeviceSettings;
-        setSettings(prev => ({ ...prev, ...remoteData }));
+        setSettings(prev => {
+          const merged = { ...prev, ...remoteData };
+          try {
+            localStorage.setItem('sensor_app_settings', JSON.stringify(merged));
+          } catch (e) {}
+          return merged;
+        });
       }
     }, (err) => {
       console.error("Firestore settings listener error:", err);
@@ -365,20 +404,29 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Update remote device configuration
+  // Update remote device configuration (Persist to LocalStorage, Firestore & Server)
   const updateDeviceConfig = async (newConfig: Partial<DeviceSettings>) => {
     setIsUpdatingConfig(true);
     const updated = { ...settings, ...newConfig, updatedAt: Date.now() };
     setSettings(updated);
+    
+    // Save to LocalStorage immediately so reloading always remembers roomType & settings!
+    try {
+      localStorage.setItem('sensor_app_settings', JSON.stringify(updated));
+    } catch (e) {}
 
     try {
+      // 1. Direct Firestore write
+      await setDoc(doc(db, 'device_settings', 'config'), updated, { merge: true });
+      
+      // 2. Sync to Node/Express server backend
       await fetch('/api/device-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated),
       });
     } catch (err) {
-      console.error('Failed to sync config with server:', err);
+      console.error('Failed to sync config with server / Firestore:', err);
     } finally {
       setIsUpdatingConfig(false);
     }
@@ -559,6 +607,49 @@ export default function App() {
     return { label: 'สภาพอากาศ', icon: Cloud, color: 'text-slate-400' };
   };
 
+  const lcdLine1Ref = React.useRef<string | undefined>(settings.lcdLine1);
+  const lcdLine2Ref = React.useRef<string | undefined>(settings.lcdLine2);
+
+  useEffect(() => {
+    if (!latestData) return;
+    
+    // Convert to uppercase English for standard TFT ESP32 Font support
+    let roomStatusEng = 'NORMAL';
+    if (tempStatus.err) roomStatusEng = 'SENSOR ERROR';
+    else if (tempStatus.warn) {
+      if (tempStatus.label.includes('สูง')) roomStatusEng = 'WARNING: HIGH TEMP';
+      else if (tempStatus.label.includes('ต่ำ')) roomStatusEng = 'WARNING: LOW TEMP';
+      else roomStatusEng = 'WARNING: HUMIDITY';
+    } else {
+      roomStatusEng = `NORMAL (${currentRoom.name.split(' ')[0] === 'ห้องทั่วไป' ? 'Gen' : 
+                                  currentRoom.name.split(' ')[0] === 'ห้องนอน' ? 'Bed' : 
+                                  currentRoom.name.split(' ')[0] === 'ห้องเซิร์ฟเวอร์' ? 'Server' : 
+                                  currentRoom.name.split(' ')[0] === 'โรงเรือนปลูกพืช' ? 'Greenhouse' : 
+                                  'Baby'})`;
+    }
+
+    let weatherEng = 'EXT: WAITING...';
+    if (outdoorWeather) {
+      let iconEng = 'Cloudy';
+      if (outdoorWeather.weatherCode === 0) iconEng = 'Clear';
+      else if (outdoorWeather.weatherCode >= 51 && outdoorWeather.weatherCode <= 82) iconEng = 'Rain';
+      else if (outdoorWeather.weatherCode >= 95) iconEng = 'Storm';
+      
+      let locShort = outdoorWeather.locationName;
+      if (locShort.length > 10) locShort = locShort.substring(0, 10);
+      
+      weatherEng = `EXT: ${locShort} | ${outdoorWeather.temp.toFixed(1)}C | ${iconEng}`;
+    }
+
+    if (lcdLine1Ref.current !== roomStatusEng || lcdLine2Ref.current !== weatherEng) {
+      lcdLine1Ref.current = roomStatusEng;
+      lcdLine2Ref.current = weatherEng;
+      // Use firestore SDK directly instead of fetching from API inside App if needed
+      // Actually we just use the existing updateDeviceConfig
+      updateDeviceConfig({ lcdLine1: roomStatusEng, lcdLine2: weatherEng });
+    }
+  }, [tempStatus, outdoorWeather, latestData, currentRoom]);
+
   // Connection State
   const connectionState = useMemo(() => {
     if (!latestData) {
@@ -604,651 +695,9 @@ export default function App() {
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app';
   const serverUrlEndpoint = `${currentOrigin.replace('ais-dev-', 'ais-pre-')}/api/sensor-data`;
 
-  // Code version 1: Lightweight Code without ArduinoJson dependency
-  const esp32CodeLight = `
-#include <SPI.h>
-#include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
-#include <WiFiManager.h>
-#include <SimpleDHT.h>
-#include <Wire.h> 
-#include <time.h> 
-#include "soc/soc.h"          
-#include "soc/rtc_cntl_reg.h" 
-
-// --- 1. การเชื่อมต่อ Server & Cloud ---
-const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-client-0516953163/databases/ai-studio-iotsensordashboa-6c74a260-d381-44d8-ae58-a587051c2d98/documents/sensor_data?key=AIzaSyCXLGKCPAStDBt0RTcCUdX3ew4c_uB6oxs";
-
-// --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32-2432S028) ---
-#define XPT2046_IRQ   36
-#define XPT2046_MOSI  32
-#define XPT2046_MISO  39
-#define XPT2046_CLK   25
-#define XPT2046_CS    33
-#define TFT_BL        21  
-
-SPIClass touchSpi = SPIClass(VSPI);
-XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
-TFT_eSPI tft = TFT_eSPI();
-
-// --- 3. ตัวแปรสถานะระบบ ---
-float temp = 0, humi = 0;
-bool isSensorError = true;
-int lastCloudCode = 0;
-unsigned long lastSend = 0;
-unsigned long lastTimeUpdate = 0;
-const int sendIntervalSec = 30;
-int currentShtAddress = 0;
-
-// --- 4. ฟังก์ชันจัดการเซนเซอร์ (อ่าน DHT11, DHT22, SHT30) ---
-void scanAndReadSensor() {
-  isSensorError = true;
-  float t = 0, h = 0;
-
-  // 4.1 ลองอ่าน SHT30 (I2C)
-  if (currentShtAddress == 0) {
-    Wire.begin(27, 22);
-    Wire.beginTransmission(0x44);
-    if (Wire.endTransmission() == 0) currentShtAddress = 0x44;
-    else {
-      Wire.beginTransmission(0x45);
-      if (Wire.endTransmission() == 0) currentShtAddress = 0x45;
-    }
-  }
-  
-  if (currentShtAddress != 0) {
-    Wire.beginTransmission(currentShtAddress);
-    Wire.write(0x2C); Wire.write(0x06);
-    if (Wire.endTransmission() == 0) {
-      delay(20);
-      Wire.requestFrom(currentShtAddress, 6);
-      if (Wire.available() == 6) {
-        uint8_t data[6];
-        for (int i = 0; i < 6; i++) data[i] = Wire.read();
-        t = ((((data[0] * 256.0) + data[1]) * 175) / 65535.0) - 45;
-        h = ((((data[3] * 256.0) + data[4]) * 100) / 65535.0);
-        if (!isnan(t) && !isnan(h) && t > -40 && t < 120 && h >= 0 && h <= 100) {
-          temp = t; humi = h; isSensorError = false;
-          return; 
-        }
-      }
-    }
-  }
-
-  // 4.2 ลองอ่าน DHT11/DHT22 แบบ Native High-Precision Bit Reader
-  int dhtPins[] = {27, 22, 17};
-  for (int p : dhtPins) {
-    pinMode(p, INPUT_PULLUP); delay(2);
-    pinMode(p, OUTPUT); digitalWrite(p, LOW); delay(20);
-    digitalWrite(p, HIGH); delayMicroseconds(40);
-    pinMode(p, INPUT_PULLUP);
-    
-    unsigned long timeout = micros();
-    while (digitalRead(p) == HIGH) { if (micros() - timeout > 100) break; }
-    timeout = micros();
-    while (digitalRead(p) == LOW) { if (micros() - timeout > 100) break; }
-    timeout = micros();
-    while (digitalRead(p) == HIGH) { if (micros() - timeout > 100) break; }
-    
-    uint8_t data[5] = {0, 0, 0, 0, 0};
-    bool pinValid = true;
-    noInterrupts();
-    for (int i = 0; i < 40; i++) {
-      timeout = micros();
-      while (digitalRead(p) == LOW) { if (micros() - timeout > 100) { pinValid = false; break; } }
-      unsigned long ts = micros();
-      while (digitalRead(p) == HIGH) { if (micros() - ts > 100) { pinValid = false; break; } }
-      if ((micros() - ts) > 40) data[i / 8] |= (1 << (7 - (i % 8)));
-    }
-    interrupts();
-    
-    if (pinValid && ((data[0] + data[1] + data[2] + data[3]) & 0xFF) == data[4] && data[4] != 0) {
-      if (data[1] == 0 && data[3] == 0) { 
-        t = data[2]; h = data[0]; 
-      } else { 
-        t = ((data[2] & 0x7F) << 8 | data[3]) * 0.1;
-        if (data[2] & 0x80) t *= -1;
-        h = (data[0] << 8 | data[1]) * 0.1;
-      }
-      if (!isnan(t) && !isnan(h) && t > -40 && t < 120 && h >= 0 && h <= 100) {
-        temp = t; humi = h; isSensorError = false;
-        return; 
-      }
-    }
-  }
-}
-
-// --- 5. การแสดงผลหน้าจอ (UI) ดีไซน์ใหม่ ---
-void drawUI() {
-  tft.fillScreen(TFT_BLACK);
-  
-  // Top Bar: Time container
-  tft.fillRect(0, 0, 320, 50, tft.color565(20, 30, 50));
-  tft.setTextColor(TFT_WHITE, tft.color565(20, 30, 50));
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("Loading Time...", 160, 25, 4);
-
-  // Middle labels
-  tft.setTextColor(tft.color565(150, 150, 150), TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("TEMPERATURE", 80, 75, 2);
-  tft.drawString("HUMIDITY", 240, 75, 2);
-
-  // Line separator
-  tft.drawFastVLine(160, 60, 130, tft.color565(40, 40, 40));
-  
-  // Bottom Bar (Status & Button)
-  tft.fillRect(0, 205, 320, 35, tft.color565(15, 15, 15));
-  
-  // Reset WiFi Button
-  tft.fillRoundRect(230, 208, 85, 28, 4, tft.color565(255, 180, 0));
-  tft.setTextColor(TFT_BLACK, tft.color565(255, 180, 0));
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("WIFI CFG", 272, 222, 2);
-}
-
-void drawTime() {
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 50)) {
-    char timeStr[30];
-    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
-    
-    // Clear top bar area for text
-    tft.fillRect(0, 0, 320, 50, tft.color565(20, 30, 50)); 
-    
-    // Check if we also want date
-    char dateStr[30];
-    strftime(dateStr, sizeof(dateStr), "%d %b %Y", &timeinfo);
-    
-    tft.setTextColor(TFT_WHITE, tft.color565(20, 30, 50));
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString(timeStr, 160, 18, 4); // Big Time
-    tft.setTextColor(tft.color565(200, 200, 200), tft.color565(20, 30, 50));
-    tft.drawString(dateStr, 160, 38, 2); // Small Date
-  }
-}
-
-void drawStatusCard() {
-  // --- Temperature ---
-  tft.fillRect(0, 90, 155, 90, TFT_BLACK); 
-  tft.setTextDatum(MC_DATUM);
-  if (isSensorError) {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("ERR", 80, 130, 6);
-  } else {
-    tft.setTextColor(tft.color565(255, 95, 45), TFT_BLACK);
-    tft.drawString(String(temp, 1), 70, 130, 6); 
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString("C", 135, 120, 4);
-  }
-
-  // --- Humidity ---
-  tft.fillRect(165, 90, 155, 90, TFT_BLACK);
-  if (isSensorError) {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("ERR", 240, 130, 6);
-  } else {
-    tft.setTextColor(tft.color565(50, 180, 255), TFT_BLACK);
-    tft.drawString(String(humi, 1), 230, 130, 6);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString("%", 295, 120, 4);
-  }
-  
-  // --- Bottom Status Bar (Left side) ---
-  tft.fillRect(0, 205, 225, 35, tft.color565(15, 15, 15));
-  tft.setTextColor(TFT_LIGHTGREY, tft.color565(15, 15, 15));
-  tft.setTextDatum(ML_DATUM);
-  
-  String ipStr = "IP: " + WiFi.localIP().toString();
-  String codeStr = "HTTP: " + String(lastCloudCode);
-  tft.drawString(ipStr, 5, 215, 1);
-  tft.drawString(codeStr, 5, 228, 1);
-}
-
-void checkTouch() {
-  if (touch.touched()) {
-    TS_Point p = touch.getPoint();
-    // Rotation Mapping for Touch (Landscape)
-    int touchX = map(p.x, 300, 3800, 0, 320);
-    int touchY = map(p.y, 300, 3800, 0, 240);
-    
-    // Check if touched the WIFI CFG button (230, 208, 85, 28)
-    if (touchX > 220 && touchX < 320 && touchY > 195 && touchY < 240) {
-      tft.fillScreen(TFT_BLACK);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString("Resetting WiFi...", 160, 100, 4);
-      tft.drawString("Please wait.", 160, 130, 2);
-      delay(1000);
-      WiFiManager wm;
-      wm.resetSettings();
-      ESP.restart();
-    }
-  }
-}
-
-// --- 6. ฟังก์ชัน Setup & Loop ---
-void setup() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ปิด Brownout
-  Serial.begin(115200);
-
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);
-
-  touchSpi.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
-  touch.begin();
-  touch.setRotation(1);
-
-  tft.init();
-  tft.setRotation(1);
-  
-  // Initial Loading Screen
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("Connecting WiFi...", 160, 100, 4);
-  tft.drawString("Use phone to connect CYD_ESP32_LIGHT", 160, 140, 2);
-
-  // Default WiFi Fallback
-  WiFi.mode(WIFI_STA);
-  WiFi.begin("Mai_home_2.4G", "0909142651");
-  int retry = 0;
-  while(WiFi.status() != WL_CONNECTED && retry < 15) {
-     delay(500);
-     Serial.print(".");
-     retry++;
-  }
-
-  // Setup WiFi Manager if hardcoded one fails
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFiManager wm;
-    wm.setConfigPortalTimeout(180); 
-    if (!wm.startConfigPortal("CYD_ESP32_LIGHT")) {
-      Serial.println("Failed to connect or hit timeout");
-      delay(3000);
-      ESP.restart();
-    }
-  }
-
-  Serial.println("\\nWiFi Connected!");
-  Serial.print("IP: "); Serial.println(WiFi.localIP());
-
-  // Setup Time
-  configTime(25200, 0, "asia.pool.ntp.org", "pool.ntp.org", "time.nist.gov");
-
-  drawUI();
-}
-
-void loop() {
-  checkTouch();
-
-  // Update Time every second
-  if (millis() - lastTimeUpdate > 1000) {
-    drawTime();
-    lastTimeUpdate = millis();
-  }
-
-  // Update Sensor Data & Cloud
-  if (millis() - lastSend > (sendIntervalSec * 1000) || lastSend == 0) {
-    scanAndReadSensor();
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      WiFiClientSecure client; client.setInsecure();
-      HTTPClient http;
-      http.setTimeout(8000);
-      http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-      
-      if (http.begin(client, serverUrl)) {
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
-        
-        time_t now; time(&now);
-        String json = "{";
-        json += "\\"fields\\": {";
-        json += "\\"temperature\\": {\\"doubleValue\\": " + String(temp, 1) + "},";
-        json += "\\"humidity\\": {\\"doubleValue\\": " + String(humi, 1) + "},";
-        json += "\\"sensor_error\\": {\\"booleanValue\\": " + String(isSensorError ? "true" : "false") + "},";
-        json += "\\"timestamp\\": {\\"integerValue\\": \\"" + String((unsigned long)now) + "000\\"}";
-        json += "}}";
-
-        Serial.println("Sending Data...");
-        lastCloudCode = http.POST(json);
-        Serial.print("HTTP: "); Serial.println(lastCloudCode);
-        http.end();
-      }
-    }
-    
-    drawStatusCard();
-    lastSend = millis();
-  }
-}
-`;
-
-  // Code version 2: Full 2-Way Sync Code with ArduinoJson v7 Library
-  const esp32CodeJson = `
-#include <SPI.h>
-#include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
-#include <WiFiManager.h>
-#include <SimpleDHT.h>
-#include <Wire.h> 
-#include <time.h> 
-#include "soc/soc.h"          
-#include "soc/rtc_cntl_reg.h" 
-
-// --- 1. การเชื่อมต่อ Server & Cloud ---
-const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-client-0516953163/databases/ai-studio-iotsensordashboa-6c74a260-d381-44d8-ae58-a587051c2d98/documents/sensor_data?key=AIzaSyCXLGKCPAStDBt0RTcCUdX3ew4c_uB6oxs";
-
-// --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ (CYD ESP32-2432S028) ---
-#define XPT2046_IRQ   36
-#define XPT2046_MOSI  32
-#define XPT2046_MISO  39
-#define XPT2046_CLK   25
-#define XPT2046_CS    33
-#define TFT_BL        21  
-
-SPIClass touchSpi = SPIClass(VSPI);
-XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
-TFT_eSPI tft = TFT_eSPI();
-
-// --- 3. ตัวแปรสถานะระบบ ---
-float temp = 0, humi = 0;
-bool isSensorError = true;
-int lastCloudCode = 0;
-unsigned long lastSend = 0;
-unsigned long lastTimeUpdate = 0;
-const int sendIntervalSec = 30;
-int currentShtAddress = 0;
-
-// --- 4. ฟังก์ชันจัดการเซนเซอร์ (อ่าน DHT11, DHT22, SHT30) ---
-void scanAndReadSensor() {
-  isSensorError = true;
-  float t = 0, h = 0;
-
-  // 4.1 ลองอ่าน SHT30 (I2C)
-  if (currentShtAddress == 0) {
-    Wire.begin(27, 22);
-    Wire.beginTransmission(0x44);
-    if (Wire.endTransmission() == 0) currentShtAddress = 0x44;
-    else {
-      Wire.beginTransmission(0x45);
-      if (Wire.endTransmission() == 0) currentShtAddress = 0x45;
-    }
-  }
-  
-  if (currentShtAddress != 0) {
-    Wire.beginTransmission(currentShtAddress);
-    Wire.write(0x2C); Wire.write(0x06);
-    if (Wire.endTransmission() == 0) {
-      delay(20);
-      Wire.requestFrom(currentShtAddress, 6);
-      if (Wire.available() == 6) {
-        uint8_t data[6];
-        for (int i = 0; i < 6; i++) data[i] = Wire.read();
-        t = ((((data[0] * 256.0) + data[1]) * 175) / 65535.0) - 45;
-        h = ((((data[3] * 256.0) + data[4]) * 100) / 65535.0);
-        if (!isnan(t) && !isnan(h) && t > -40 && t < 120 && h >= 0 && h <= 100) {
-          temp = t; humi = h; isSensorError = false;
-          return; 
-        }
-      }
-    }
-  }
-
-  // 4.2 ลองอ่าน DHT11/DHT22 แบบ Native High-Precision Bit Reader
-  int dhtPins[] = {27, 22, 17};
-  for (int p : dhtPins) {
-    pinMode(p, INPUT_PULLUP); delay(2);
-    pinMode(p, OUTPUT); digitalWrite(p, LOW); delay(20);
-    digitalWrite(p, HIGH); delayMicroseconds(40);
-    pinMode(p, INPUT_PULLUP);
-    
-    unsigned long timeout = micros();
-    while (digitalRead(p) == HIGH) { if (micros() - timeout > 100) break; }
-    timeout = micros();
-    while (digitalRead(p) == LOW) { if (micros() - timeout > 100) break; }
-    timeout = micros();
-    while (digitalRead(p) == HIGH) { if (micros() - timeout > 100) break; }
-    
-    uint8_t data[5] = {0, 0, 0, 0, 0};
-    bool pinValid = true;
-    noInterrupts();
-    for (int i = 0; i < 40; i++) {
-      timeout = micros();
-      while (digitalRead(p) == LOW) { if (micros() - timeout > 100) { pinValid = false; break; } }
-      unsigned long ts = micros();
-      while (digitalRead(p) == HIGH) { if (micros() - ts > 100) { pinValid = false; break; } }
-      if ((micros() - ts) > 40) data[i / 8] |= (1 << (7 - (i % 8)));
-    }
-    interrupts();
-    
-    if (pinValid && ((data[0] + data[1] + data[2] + data[3]) & 0xFF) == data[4] && data[4] != 0) {
-      if (data[1] == 0 && data[3] == 0) { 
-        t = data[2]; h = data[0]; 
-      } else { 
-        t = ((data[2] & 0x7F) << 8 | data[3]) * 0.1;
-        if (data[2] & 0x80) t *= -1;
-        h = (data[0] << 8 | data[1]) * 0.1;
-      }
-      if (!isnan(t) && !isnan(h) && t > -40 && t < 120 && h >= 0 && h <= 100) {
-        temp = t; humi = h; isSensorError = false;
-        return; 
-      }
-    }
-  }
-}
-
-// --- 5. การแสดงผลหน้าจอ (UI) ดีไซน์ใหม่ ---
-void drawUI() {
-  tft.fillScreen(TFT_BLACK);
-  
-  // Top Bar: Time container
-  tft.fillRect(0, 0, 320, 50, tft.color565(20, 30, 50));
-  tft.setTextColor(TFT_WHITE, tft.color565(20, 30, 50));
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("Loading Time...", 160, 25, 4);
-
-  // Middle labels
-  tft.setTextColor(tft.color565(150, 150, 150), TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("TEMPERATURE", 80, 75, 2);
-  tft.drawString("HUMIDITY", 240, 75, 2);
-
-  // Line separator
-  tft.drawFastVLine(160, 60, 130, tft.color565(40, 40, 40));
-  
-  // Bottom Bar (Status & Button)
-  tft.fillRect(0, 205, 320, 35, tft.color565(15, 15, 15));
-  
-  // Reset WiFi Button
-  tft.fillRoundRect(230, 208, 85, 28, 4, tft.color565(255, 180, 0));
-  tft.setTextColor(TFT_BLACK, tft.color565(255, 180, 0));
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("WIFI CFG", 272, 222, 2);
-}
-
-void drawTime() {
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 50)) {
-    char timeStr[30];
-    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
-    
-    // Clear top bar area for text
-    tft.fillRect(0, 0, 320, 50, tft.color565(20, 30, 50)); 
-    
-    // Check if we also want date
-    char dateStr[30];
-    strftime(dateStr, sizeof(dateStr), "%d %b %Y", &timeinfo);
-    
-    tft.setTextColor(TFT_WHITE, tft.color565(20, 30, 50));
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString(timeStr, 160, 18, 4); // Big Time
-    tft.setTextColor(tft.color565(200, 200, 200), tft.color565(20, 30, 50));
-    tft.drawString(dateStr, 160, 38, 2); // Small Date
-  }
-}
-
-void drawStatusCard() {
-  // --- Temperature ---
-  tft.fillRect(0, 90, 155, 90, TFT_BLACK); 
-  tft.setTextDatum(MC_DATUM);
-  if (isSensorError) {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("ERR", 80, 130, 6);
-  } else {
-    tft.setTextColor(tft.color565(255, 95, 45), TFT_BLACK);
-    tft.drawString(String(temp, 1), 70, 130, 6); 
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString("C", 135, 120, 4);
-  }
-
-  // --- Humidity ---
-  tft.fillRect(165, 90, 155, 90, TFT_BLACK);
-  if (isSensorError) {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("ERR", 240, 130, 6);
-  } else {
-    tft.setTextColor(tft.color565(50, 180, 255), TFT_BLACK);
-    tft.drawString(String(humi, 1), 230, 130, 6);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString("%", 295, 120, 4);
-  }
-  
-  // --- Bottom Status Bar (Left side) ---
-  tft.fillRect(0, 205, 225, 35, tft.color565(15, 15, 15));
-  tft.setTextColor(TFT_LIGHTGREY, tft.color565(15, 15, 15));
-  tft.setTextDatum(ML_DATUM);
-  
-  String ipStr = "IP: " + WiFi.localIP().toString();
-  String codeStr = "HTTP: " + String(lastCloudCode);
-  tft.drawString(ipStr, 5, 215, 1);
-  tft.drawString(codeStr, 5, 228, 1);
-}
-
-void checkTouch() {
-  if (touch.touched()) {
-    TS_Point p = touch.getPoint();
-    // Rotation Mapping for Touch (Landscape)
-    int touchX = map(p.x, 300, 3800, 0, 320);
-    int touchY = map(p.y, 300, 3800, 0, 240);
-    
-    // Check if touched the WIFI CFG button (230, 208, 85, 28)
-    if (touchX > 220 && touchX < 320 && touchY > 195 && touchY < 240) {
-      tft.fillScreen(TFT_BLACK);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString("Resetting WiFi...", 160, 100, 4);
-      tft.drawString("Please wait.", 160, 130, 2);
-      delay(1000);
-      WiFiManager wm;
-      wm.resetSettings();
-      ESP.restart();
-    }
-  }
-}
-
-// --- 6. ฟังก์ชัน Setup & Loop ---
-void setup() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ปิด Brownout
-  Serial.begin(115200);
-
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);
-
-  touchSpi.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
-  touch.begin();
-  touch.setRotation(1);
-
-  tft.init();
-  tft.setRotation(1);
-  
-  // Initial Loading Screen
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("Connecting WiFi...", 160, 100, 4);
-  tft.drawString("Use phone to connect CYD_ESP32_LIGHT", 160, 140, 2);
-
-  // Default WiFi Fallback
-  WiFi.mode(WIFI_STA);
-  WiFi.begin("Mai_home_2.4G", "0909142651");
-  int retry = 0;
-  while(WiFi.status() != WL_CONNECTED && retry < 15) {
-     delay(500);
-     Serial.print(".");
-     retry++;
-  }
-
-  // Setup WiFi Manager if hardcoded one fails
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFiManager wm;
-    wm.setConfigPortalTimeout(180); 
-    if (!wm.startConfigPortal("CYD_ESP32_LIGHT")) {
-      Serial.println("Failed to connect or hit timeout");
-      delay(3000);
-      ESP.restart();
-    }
-  }
-
-  Serial.println("\\nWiFi Connected!");
-  Serial.print("IP: "); Serial.println(WiFi.localIP());
-
-  // Setup Time
-  configTime(25200, 0, "asia.pool.ntp.org", "pool.ntp.org", "time.nist.gov");
-
-  drawUI();
-}
-
-void loop() {
-  checkTouch();
-
-  // Update Time every second
-  if (millis() - lastTimeUpdate > 1000) {
-    drawTime();
-    lastTimeUpdate = millis();
-  }
-
-  // Update Sensor Data & Cloud
-  if (millis() - lastSend > (sendIntervalSec * 1000) || lastSend == 0) {
-    scanAndReadSensor();
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      WiFiClientSecure client; client.setInsecure();
-      HTTPClient http;
-      http.setTimeout(8000);
-      http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-      
-      if (http.begin(client, serverUrl)) {
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("User-Agent", "ESP32-CYD-SensorFlow");
-        
-        time_t now; time(&now);
-        String json = "{";
-        json += "\\"fields\\": {";
-        json += "\\"temperature\\": {\\"doubleValue\\": " + String(temp, 1) + "},";
-        json += "\\"humidity\\": {\\"doubleValue\\": " + String(humi, 1) + "},";
-        json += "\\"sensor_error\\": {\\"booleanValue\\": " + String(isSensorError ? "true" : "false") + "},";
-        json += "\\"timestamp\\": {\\"integerValue\\": \\"" + String((unsigned long)now) + "000\\"}";
-        json += "}}";
-
-        Serial.println("Sending Data...");
-        lastCloudCode = http.POST(json);
-        Serial.print("HTTP: "); Serial.println(lastCloudCode);
-        http.end();
-      }
-    }
-    
-    drawStatusCard();
-    lastSend = millis();
-  }
-}
-`;
+  // Dynamic ESP32 CYD Firmware generator
+  const esp32CodeLight = useMemo(() => getEsp32Firmware(settings), [settings]);
+  const esp32CodeJson = esp32CodeLight;
 
   const handleCopyCode = (textToCopy: string) => {
     navigator.clipboard.writeText(textToCopy);
@@ -1274,49 +723,18 @@ void loop() {
           </div>
           <h1 className="text-lg sm:text-xl font-bold tracking-tight flex items-center flex-wrap gap-2">
             <span>SensorFlow <span className="text-blue-600">Realtime Cloud</span></span>
-            <span className="text-[13px] font-semibold text-slate-500 bg-slate-100 px-2.5 py-0.5 rounded-md border border-slate-200">
+            <span className="text-[13px] font-semibold text-slate-600 bg-slate-100 px-2.5 py-0.5 rounded-md border border-slate-200">
               {settings.deviceName || 'Sensor 1'}
+            </span>
+            <span className="text-xs font-semibold text-blue-700 bg-blue-50 px-2.5 py-0.5 rounded-md border border-blue-200 flex items-center gap-1">
+              🏷️ {ROOM_STANDARDS[settings.roomType as RoomType]?.name || 'ห้องทั่วไป'}
             </span>
           </h1>
         </div>
         
-        <div className="flex items-center gap-2 sm:gap-4">
-          <button 
-            onClick={handleRefreshData}
-            disabled={isRefreshing}
-            title="ดึงข้อมูลล่าสุดจาก Cloud ทันที"
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-bold text-emerald-700 bg-emerald-50 border border-emerald-300 rounded-lg hover:bg-emerald-100 transition-colors cursor-pointer shadow-sm disabled:opacity-50"
-          >
-            <RefreshCw className={`w-4 h-4 text-emerald-600 ${isRefreshing ? 'animate-spin' : ''}`} />
-            <span>{isRefreshing ? 'กำลังดึงข้อมูล...' : 'ดึงข้อมูลล่าสุด (Refresh)'}</span>
-          </button>
-
-          <button 
-            onClick={() => setShowCodeModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors cursor-pointer"
-          >
-            <Code className="w-4 h-4 text-blue-600" />
-            <span>โค้ด ESP32 (2-Way)</span>
-          </button>
-
-          <button 
-            onClick={exportToCSV}
-            title="Export CSV"
-            className="flex items-center gap-2 p-2 sm:px-3 sm:py-1.5 text-xs sm:text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
-          >
-            <Download className="w-4 h-4" />
-            <span className="hidden sm:inline">Export CSV</span>
-          </button>
-
-          <button 
-            onClick={() => setShowSettings(!showSettings)}
-            className={`p-2 rounded-full transition-colors ${showSettings ? 'bg-blue-100 text-blue-600' : 'text-slate-500 hover:bg-slate-100'}`}
-          >
-            <Settings className="w-5 h-5" />
-          </button>
-
+        <div className="flex items-center gap-3 sm:gap-4">
           {/* Connection Badge */}
-          <div className={`hidden lg:flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-semibold ${
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold ${
             connectionState.color === 'green' ? 'bg-green-50 text-green-700 border-green-200' :
             connectionState.color === 'amber' ? 'bg-amber-50 text-amber-700 border-amber-200' :
             'bg-red-50 text-red-700 border-red-200'
@@ -1328,6 +746,14 @@ void loop() {
             }`}></div>
             <span>{connectionState.label}</span>
           </div>
+
+          <button 
+            onClick={() => setShowSettings(!showSettings)}
+            className="flex items-center gap-2 px-3.5 py-2 text-xs sm:text-sm font-bold text-slate-700 bg-slate-100 hover:bg-blue-50 hover:text-blue-700 border border-slate-300 hover:border-blue-300 rounded-xl transition-all cursor-pointer shadow-sm"
+          >
+            <Settings className="w-4 h-4 text-blue-600" />
+            <span>ตั้งค่า & เครื่องมือ (Settings)</span>
+          </button>
         </div>
       </nav>
 
@@ -2113,10 +1539,61 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
               {/* Modal Scrollable Content Body */}
               <div className="p-4 sm:p-6 space-y-5 overflow-y-auto flex-1 min-h-0 text-slate-700">
 
+                {/* Image 1: Quick Actions & Tools Consolidated in Settings */}
+                <div className="bg-gradient-to-br from-slate-50 to-blue-50/60 p-4 rounded-xl border border-blue-200/70 space-y-3 shadow-xs">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <Activity className="w-4 h-4 text-blue-600" /> เครื่องมือด่วน & จัดการระบบ (Tools & Actions)
+                    </h3>
+                    <span className="text-[10px] text-blue-700 bg-blue-100/70 px-2 py-0.5 rounded font-bold">
+                      รวมปุ่มจากหน้าหลัก
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    {/* 1. Refresh Button */}
+                    <button 
+                      onClick={() => {
+                        handleRefreshData();
+                      }}
+                      disabled={isRefreshing}
+                      title="ดึงข้อมูลล่าสุดจาก Cloud ทันที"
+                      className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold text-emerald-700 bg-white border border-emerald-300 hover:bg-emerald-50 rounded-lg transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 text-emerald-600 ${isRefreshing ? 'animate-spin' : ''}`} />
+                      <span>{isRefreshing ? 'กำลังดึง...' : 'ดึงข้อมูลล่าสุด (Refresh)'}</span>
+                    </button>
+
+                    {/* 2. ESP32 Code Button */}
+                    <button 
+                      onClick={() => {
+                        setShowSettings(false);
+                        setShowCodeModal(true);
+                      }}
+                      className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold text-blue-700 bg-white border border-blue-300 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer shadow-xs"
+                    >
+                      <Code className="w-3.5 h-3.5 text-blue-600" />
+                      <span>โค้ด ESP32 (2-Way)</span>
+                    </button>
+
+                    {/* 3. Export CSV Button */}
+                    <button 
+                      onClick={() => {
+                        setShowSettings(false);
+                        setShowExportModal(true);
+                      }}
+                      className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors cursor-pointer shadow-xs"
+                    >
+                      <Download className="w-3.5 h-3.5 text-slate-600" />
+                      <span>Export CSV</span>
+                    </button>
+                  </div>
+                </div>
+
                 {/* Room Type & Basic Info */}
                 <div className="space-y-4 pb-2 border-b border-slate-100">
                   <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                    <Info className="w-4 h-4 text-blue-600" /> ข้อมูลทั่วไปของเซ็นเซอร์
+                    <Info className="w-4 h-4 text-blue-600" /> ข้อมูลทั่วไปของเซ็นเซอร์ & ประเภทห้อง
                   </h3>
                   <div className="grid grid-cols-1 gap-4">
                     <div>
@@ -2132,21 +1609,69 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        ประเภทห้อง / สถานที่ติดตั้ง (ใช้วิเคราะห์ค่ามาตรฐาน)
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-semibold text-slate-700">
+                          ประเภทห้อง / สถานที่ติดตั้ง (ใช้วิเคราะห์ค่ามาตรฐาน)
+                        </label>
+                        <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                          ✓ บันทึกจำค่าอัตโนมัติ
+                        </span>
+                      </div>
                       <select 
                         value={settings.roomType || 'general'}
                         onChange={(e) => updateDeviceConfig({ roomType: e.target.value })}
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white font-medium"
                       >
                         {Object.entries(ROOM_STANDARDS).map(([key, room]) => (
                           <option key={key} value={key}>
-                            {room.name} - (อุณหภูมิที่เหมาะสม: {room.tempMin}-{room.tempMax}°C)
+                            {room.name} — (เกณฑ์แนะนำ: {room.tempMin}-{room.tempMax}°C, {room.humMin}-{room.humMax}%)
                           </option>
                         ))}
                       </select>
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        💡 <b>คำอธิบาย:</b> {ROOM_STANDARDS[settings.roomType as RoomType]?.desc || 'อุณหภูมิห้องทั่วไป'} (ระบบจะบันทึกจำค่าประเภทห้องนี้ไว้ถาวร เมื่อเปิดแอปใหม่จะคงค่าห้องเดิมไว้เสมอ)
+                      </p>
                     </div>
+                  </div>
+                </div>
+
+                {/* Outdoor Weather Location Settings (Sync with ESP32) */}
+                <div className="space-y-3 pb-2 border-b border-slate-100">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <MapPin className="w-4 h-4 text-sky-600" /> พิกัดสภาพอากาศภายนอกจาก Internet
+                    </h3>
+                    <span className="text-[10px] text-sky-700 bg-sky-50 px-2 py-0.5 rounded border border-sky-200 font-bold">
+                      ตรงกับ ESP32 100%
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    เลือกจังหวัด/พื้นที่ เพื่อดึงข้อมูลสภาพอากาศภายนอกจาก Open-Meteo ทั้งบนหน้าเว็บและหน้าจอ ESP32 ให้แสดงตัวเลขตรงกัน 100% (ค่าเริ่มต้น: ปราจีนบุรี)
+                  </p>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      จังหวัด / พื้นที่สภาพอากาศ
+                    </label>
+                    <select 
+                      value={settings.weatherLocation || 'ปราจีนบุรี (Prachinburi)'}
+                      onChange={(e) => {
+                        const loc = WEATHER_LOCATIONS.find(l => l.name === e.target.value);
+                        if (loc) {
+                          updateDeviceConfig({
+                            weatherLocation: loc.name,
+                            weatherLat: loc.lat,
+                            weatherLon: loc.lon
+                          });
+                        }
+                      }}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white font-medium"
+                    >
+                      {WEATHER_LOCATIONS.map((loc) => (
+                        <option key={loc.id} value={loc.name}>
+                          {loc.name} (Lat: {loc.lat}, Lon: {loc.lon})
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
                 

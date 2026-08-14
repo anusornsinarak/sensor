@@ -25,6 +25,13 @@ interface DeviceSettings {
   lineToken?: string;
   lineUserId?: string;
   lineNotifyEnabled?: boolean;
+  deviceName?: string;
+  roomType?: string;
+  weatherLocation?: string;
+  weatherLat?: number;
+  weatherLon?: number;
+  lcdLine1?: string;
+  lcdLine2?: string;
   updatedAt: number;
 }
 
@@ -37,6 +44,11 @@ let activeSettings: DeviceSettings = {
   lineToken: '',
   lineUserId: '',
   lineNotifyEnabled: false,
+  deviceName: 'Sensor 1',
+  roomType: 'general',
+  weatherLocation: 'Prachinburi (ปราจีนบุรี)',
+  weatherLat: 14.0509,
+  weatherLon: 101.3716,
   updatedAt: Date.now(),
 };
 
@@ -386,7 +398,12 @@ async function startServer() {
 
   // API Route: Update device settings (from Web App)
   app.post('/api/device-config', async (req, res) => {
-    const { maxTemp, maxHum, sendIntervalSec, tempOffset, humOffset, lineToken, lineUserId, lineNotifyEnabled } = req.body;
+    const { 
+      maxTemp, maxHum, sendIntervalSec, tempOffset, humOffset, 
+      lineToken, lineUserId, lineNotifyEnabled,
+      deviceName, roomType, weatherLocation, weatherLat, weatherLon,
+      lcdLine1, lcdLine2 
+    } = req.body;
     
     if (maxTemp != null) activeSettings.maxTemp = Number(maxTemp);
     if (maxHum != null) activeSettings.maxHum = Number(maxHum);
@@ -396,6 +413,13 @@ async function startServer() {
     if (lineToken !== undefined) activeSettings.lineToken = lineToken;
     if (lineUserId !== undefined) activeSettings.lineUserId = lineUserId;
     if (lineNotifyEnabled !== undefined) activeSettings.lineNotifyEnabled = Boolean(lineNotifyEnabled);
+    if (deviceName !== undefined) activeSettings.deviceName = deviceName;
+    if (roomType !== undefined) activeSettings.roomType = roomType;
+    if (weatherLocation !== undefined) activeSettings.weatherLocation = weatherLocation;
+    if (weatherLat != null) activeSettings.weatherLat = Number(weatherLat);
+    if (weatherLon != null) activeSettings.weatherLon = Number(weatherLon);
+    if (lcdLine1 !== undefined) activeSettings.lcdLine1 = lcdLine1;
+    if (lcdLine2 !== undefined) activeSettings.lcdLine2 = lcdLine2;
     
     activeSettings.updatedAt = Date.now();
 
