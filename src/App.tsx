@@ -15,6 +15,15 @@ import firebaseConfig from '../firebase-applet-config.json';
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
+export const ROOM_STANDARDS = {
+  general: { name: 'ห้องทั่วไป (General)', tempMin: 22, tempMax: 28, humMin: 40, humMax: 60, desc: 'อุณหภูมิห้องทั่วไป' },
+  bedroom: { name: 'ห้องนอน (Bedroom)', tempMin: 20, tempMax: 25, humMin: 40, humMax: 60, desc: 'เหมาะกับการนอนหลับ' },
+  server_room: { name: 'ห้องเซิร์ฟเวอร์ (Server)', tempMin: 18, tempMax: 24, humMin: 40, humMax: 55, desc: 'ป้องกันความร้อนสะสม' },
+  greenhouse: { name: 'โรงเรือนปลูกพืช (Greenhouse)', tempMin: 20, tempMax: 30, humMin: 50, humMax: 80, desc: 'ความชื้นสูงสำหรับพืช' },
+  baby_room: { name: 'ห้องเด็กอ่อน (Baby)', tempMin: 22, tempMax: 24, humMin: 40, humMax: 60, desc: 'ควบคุมอุณหภูมิคงที่' },
+};
+type RoomType = keyof typeof ROOM_STANDARDS;
+
 interface SensorData {
   id: string;
   timestamp: number;
@@ -32,6 +41,8 @@ interface DeviceSettings {
   lineToken?: string;
   lineUserId?: string;
   lineNotifyEnabled?: boolean;
+  deviceName?: string;
+  roomType?: string;
   updatedAt?: number;
 }
 
@@ -83,6 +94,8 @@ export default function App() {
     lineToken: '',
     lineUserId: '',
     lineNotifyEnabled: false,
+    deviceName: "Sensor 1",
+    roomType: "general",
   });
 
   const [showSettings, setShowSettings] = useState(false);
@@ -458,6 +471,25 @@ export default function App() {
       humidity: Number((rawLatestData.humidity + (settings.humOffset || 0)).toFixed(1)),
     };
   }, [rawLatestData, settings.tempOffset, settings.humOffset]);
+
+  // Standard evaluation
+  const currentRoom = ROOM_STANDARDS[(settings.roomType as RoomType) || 'general'];
+  
+  const tempStatus = useMemo(() => {
+    if (!latestData || latestData.sensor_error || latestData.temperature === 0) return { label: 'เซ็นเซอร์มีปัญหา', iconClass: 'text-amber-600', textClass: 'text-amber-700', err: true };
+    const t = latestData.temperature;
+    if (t > currentRoom.tempMax) return { label: `สูงเกินไป (> ${currentRoom.tempMax}°C)`, iconClass: 'text-red-600', textClass: 'text-red-600', err: false, warn: true };
+    if (t < currentRoom.tempMin) return { label: `ต่ำเกินไป (< ${currentRoom.tempMin}°C)`, iconClass: 'text-blue-600', textClass: 'text-blue-600', err: false, warn: true };
+    return { label: `ปกติสำหรับ${currentRoom.name.split(' ')[0]}`, iconClass: 'text-green-600', textClass: 'text-green-700', err: false, warn: false };
+  }, [latestData, currentRoom]);
+
+  const humStatus = useMemo(() => {
+    if (!latestData || latestData.sensor_error || latestData.humidity === 0) return { label: 'เซ็นเซอร์มีปัญหา', iconClass: 'text-amber-600', textClass: 'text-amber-700', err: true };
+    const h = latestData.humidity;
+    if (h > currentRoom.humMax) return { label: `ชื้นเกินไป (> ${currentRoom.humMax}%)`, iconClass: 'text-red-600', textClass: 'text-red-600', err: false, warn: true };
+    if (h < currentRoom.humMin) return { label: `แห้งเกินไป (< ${currentRoom.humMin}%)`, iconClass: 'text-amber-600', textClass: 'text-amber-600', err: false, warn: true };
+    return { label: `เหมาะสมสำหรับ${currentRoom.name.split(' ')[0]}`, iconClass: 'text-teal-600', textClass: 'text-teal-700', err: false, warn: false };
+  }, [latestData, currentRoom]);
 
   // Connection State
   const connectionState = useMemo(() => {
@@ -1169,10 +1201,15 @@ void loop() {
       {/* Navbar */}
       <nav className="h-16 bg-white border-b border-slate-200 hidden md:flex items-center justify-between px-4 sm:px-8 shrink-0 shadow-sm z-10">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
             <Activity className="w-5 h-5 text-white" />
           </div>
-          <h1 className="text-lg sm:text-xl font-bold tracking-tight">SensorFlow <span className="text-blue-600">Realtime Cloud</span></h1>
+          <h1 className="text-lg sm:text-xl font-bold tracking-tight flex items-center flex-wrap gap-2">
+            <span>SensorFlow <span className="text-blue-600">Realtime Cloud</span></span>
+            <span className="text-[13px] font-semibold text-slate-500 bg-slate-100 px-2.5 py-0.5 rounded-md border border-slate-200">
+              {settings.deviceName || 'Sensor 1'}
+            </span>
+          </h1>
         </div>
         
         <div className="flex items-center gap-2 sm:gap-4">
@@ -1230,15 +1267,15 @@ void loop() {
         
         {/* Export CSV/Excel Modal */}
         {showExportModal && (
-          <div className="absolute inset-0 z-40 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in">
-            <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden animate-in zoom-in-95">
-              <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-in fade-in overflow-y-auto">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm my-auto max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95">
+              <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between shrink-0">
                 <h3 className="font-bold text-slate-800 flex items-center gap-2">
                   <Download className="w-4 h-4 text-slate-600" /> ส่งออกข้อมูล (Excel / CSV)
                 </h3>
-                <button onClick={() => setShowExportModal(false)} className="text-slate-400 hover:text-slate-600">✕</button>
+                <button onClick={() => setShowExportModal(false)} className="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-full hover:bg-slate-200/60 cursor-pointer">✕</button>
               </div>
-              <div className="p-5 space-y-4">
+              <div className="p-5 space-y-4 overflow-y-auto flex-1 min-h-0">
                 <p className="text-xs text-slate-500 leading-relaxed">
                   เลือกช่วงวันที่เริ่มต้นและสิ้นสุด เพื่อดึงข้อมูลประวัติทั้งหมดจากฐานข้อมูลสำหรับการวิเคราะห์ผ่าน Excel
                 </p>
@@ -1261,17 +1298,17 @@ void loop() {
                   />
                 </div>
               </div>
-              <div className="p-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-2">
+              <div className="p-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-2 shrink-0">
                 <button 
                   onClick={() => setShowExportModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-200 rounded-lg transition-colors"
+                  className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
                 >
                   ยกเลิก
                 </button>
                 <button 
                   onClick={handleExportCustom}
                   disabled={isExporting}
-                  className="px-4 py-2 text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors flex items-center gap-2"
+                  className="px-4 py-2 text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
                 >
                   {isExporting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                   {isExporting ? 'กำลังโหลด...' : 'ดาวน์โหลด CSV'}
@@ -1283,8 +1320,8 @@ void loop() {
 
         {/* ESP32 C++ Code Modal */}
         {showCodeModal && (
-          <div className="absolute inset-0 z-30 flex items-center justify-center p-4 sm:p-6 bg-slate-900/50 backdrop-blur-sm animate-in fade-in">
-            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-900/50 backdrop-blur-sm animate-in fade-in overflow-y-auto">
+            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-4xl my-auto max-h-[92vh] flex flex-col overflow-hidden">
               <div className="p-4 sm:p-5 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
                 <div className="flex items-center gap-3">
                   <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center">
@@ -1988,19 +2025,64 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
 
         {/* Settings Overlay */}
         {showSettings && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center p-4 sm:p-6 bg-slate-900/20 backdrop-blur-sm animate-in fade-in">
-            <div className="bg-white p-6 rounded-2xl shadow-xl border border-slate-200 w-full max-w-lg animate-in zoom-in-95 duration-200">
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-lg font-semibold flex items-center gap-2">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-900/50 backdrop-blur-sm animate-in fade-in overflow-y-auto">
+            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg my-auto max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+              
+              {/* Modal Header */}
+              <div className="flex items-center justify-between p-4 sm:p-5 border-b border-slate-100 bg-slate-50/80 shrink-0">
+                <h2 className="text-base sm:text-lg font-bold text-slate-800 flex items-center gap-2">
                   <Settings className="w-5 h-5 text-slate-500" />
                   ตั้งค่าเกณฑ์การแจ้งเตือน & สอบเทียบ (Calibration)
                 </h2>
-                <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600 w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100">
+                <button 
+                  onClick={() => setShowSettings(false)} 
+                  className="text-slate-400 hover:text-slate-600 w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-200/60 transition-colors cursor-pointer"
+                >
                   ✕
                 </button>
               </div>
               
-              <div className="space-y-4">
+              {/* Modal Scrollable Content Body */}
+              <div className="p-4 sm:p-6 space-y-5 overflow-y-auto flex-1 min-h-0 text-slate-700">
+
+                {/* Room Type & Basic Info */}
+                <div className="space-y-4 pb-2 border-b border-slate-100">
+                  <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <Info className="w-4 h-4 text-blue-600" /> ข้อมูลทั่วไปของเซ็นเซอร์
+                  </h3>
+                  <div className="grid grid-cols-1 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        ชื่อเรียกจุดติดตั้ง / ชื่อเซ็นเซอร์
+                      </label>
+                      <input 
+                        type="text" 
+                        value={settings.deviceName || 'Sensor 1'}
+                        onChange={(e) => updateDeviceConfig({ deviceName: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                        placeholder="เช่น ห้องนอนมาสเตอร์, โรงเพาะเห็ด 1"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        ประเภทห้อง / สถานที่ติดตั้ง (ใช้วิเคราะห์ค่ามาตรฐาน)
+                      </label>
+                      <select 
+                        value={settings.roomType || 'general'}
+                        onChange={(e) => updateDeviceConfig({ roomType: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                      >
+                        {Object.entries(ROOM_STANDARDS).map(([key, room]) => (
+                          <option key={key} value={key}>
+                            {room.name} - (อุณหภูมิที่เหมาะสม: {room.tempMin}-{room.tempMax}°C)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Max Thresholds */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -2026,6 +2108,7 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                   </div>
                 </div>
 
+                {/* Send Interval */}
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     ความถี่ส่งข้อมูลจาก ESP32 (Interval)
@@ -2080,6 +2163,8 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                     </div>
                   </div>
                 </div>
+
+                {/* LINE Alert Settings */}
                 <div className="pt-3 border-t border-slate-100 space-y-2">
                   <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                     <AlertCircle className="w-4 h-4 text-green-600" /> ตั้งค่าแจ้งเตือนผ่าน LINE (Messaging API)
@@ -2094,9 +2179,9 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                       id="lineNotifyEnabled"
                       checked={settings.lineNotifyEnabled || false}
                       onChange={(e) => updateDeviceConfig({ lineNotifyEnabled: e.target.checked })}
-                      className="w-4 h-4 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500"
+                      className="w-4 h-4 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500 cursor-pointer"
                     />
-                    <label htmlFor="lineNotifyEnabled" className="text-xs font-semibold text-slate-700">เปิดใช้งานแจ้งเตือน LINE</label>
+                    <label htmlFor="lineNotifyEnabled" className="text-xs font-semibold text-slate-700 cursor-pointer">เปิดใช้งานแจ้งเตือน LINE</label>
                   </div>
                   
                   <div className="grid grid-cols-1 gap-3 pt-1">
@@ -2133,35 +2218,12 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                   </div>
                 </div>
 
-              </div>
-              
-              <div className="mt-5 pt-4 border-t border-slate-200 space-y-3">
-                {/* Save & Status Footer */}
-                <div className="flex items-center justify-between gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold">
-                    {isUpdatingConfig ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin text-blue-600" />
-                        <span className="text-blue-600">กำลังบันทึกลงฐานข้อมูล Firestore...</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                        <span className="text-emerald-700">ระบบบันทึกค่าให้อัตโนมัติ (Auto-Saved)</span>
-                      </>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => setShowSettings(false)}
-                    className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs sm:text-sm shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>บันทึก & ปิดหน้าต่าง</span>
-                  </button>
-                </div>
-
                 {/* Backup & Data Retention Management */}
                 <div className="pt-3 border-t border-slate-100 space-y-2.5">
+                  <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <Download className="w-4 h-4 text-purple-600" /> จัดการข้อมูลประวัติ & สำรองข้อมูล
+                  </h3>
+                  
                   <div className="flex items-center justify-between gap-2">
                     <div>
                       <p className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
@@ -2213,7 +2275,35 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                     </button>
                   </div>
                 </div>
+
               </div>
+              
+              {/* Modal Sticky Footer */}
+              <div className="p-4 border-t border-slate-200 bg-slate-50 shrink-0">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold">
+                    {isUpdatingConfig ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-blue-600" />
+                        <span className="text-blue-600">กำลังบันทึกลงฐานข้อมูล...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                        <span className="text-emerald-700">ระบบบันทึกค่าให้อัตโนมัติ (Auto-Saved)</span>
+                      </>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setShowSettings(false)}
+                    className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs sm:text-sm shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>บันทึก & ปิดหน้าต่าง</span>
+                  </button>
+                </div>
+              </div>
+
             </div>
           </div>
         )}
@@ -2268,12 +2358,12 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                   <span className="text-xl text-slate-500 font-medium">°C</span>
                 </div>
                 <div className="mt-2 flex items-center gap-1 text-[11px] text-blue-600">
-                  {latestData && (latestData.sensor_error || latestData.temperature === 0) ? (
-                    <><AlertTriangle className="w-3.5 h-3.5 text-amber-600" /><span className="text-amber-700 font-medium">เซ็นเซอร์มีปัญหา (Fault)</span></>
-                  ) : latestData && latestData.temperature > settings.maxTemp ? (
-                    <><AlertTriangle className="w-3.5 h-3.5 text-red-600" /><span className="text-red-600 font-medium">เกินกำหนด! ({'>'} {settings.maxTemp}°C)</span></>
+                  {tempStatus.err ? (
+                    <><AlertTriangle className={`w-3.5 h-3.5 ${tempStatus.iconClass}`} /><span className={`${tempStatus.textClass} font-medium`}>{tempStatus.label}</span></>
+                  ) : tempStatus.warn ? (
+                    <><AlertTriangle className={`w-3.5 h-3.5 ${tempStatus.iconClass}`} /><span className={`${tempStatus.textClass} font-medium`}>{tempStatus.label}</span></>
                   ) : (
-                    <><Thermometer className="w-3.5 h-3.5" /><span>ปกติ (Normal)</span></>
+                    <><Thermometer className={`w-3.5 h-3.5 ${tempStatus.iconClass}`} /><span className={`${tempStatus.textClass} font-medium`}>{tempStatus.label}</span></>
                   )}
                 </div>
               </div>
@@ -2288,12 +2378,12 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                   <span className="text-xl text-slate-500 font-medium">%</span>
                 </div>
                 <div className="mt-2 flex items-center gap-1 text-[11px] text-teal-600">
-                  {latestData && (latestData.sensor_error || latestData.humidity === 0) ? (
-                    <><AlertTriangle className="w-3.5 h-3.5 text-amber-600" /><span className="text-amber-700 font-medium">เซ็นเซอร์มีปัญหา (Fault)</span></>
-                  ) : latestData && latestData.humidity > settings.maxHum ? (
-                    <><AlertTriangle className="w-3.5 h-3.5 text-red-600" /><span className="text-red-600 font-medium">เกินกำหนด! ({'>'} {settings.maxHum}%)</span></>
+                  {humStatus.err ? (
+                    <><AlertTriangle className={`w-3.5 h-3.5 ${humStatus.iconClass}`} /><span className={`${humStatus.textClass} font-medium`}>{humStatus.label}</span></>
+                  ) : humStatus.warn ? (
+                    <><AlertTriangle className={`w-3.5 h-3.5 ${humStatus.iconClass}`} /><span className={`${humStatus.textClass} font-medium`}>{humStatus.label}</span></>
                   ) : (
-                    <><Droplets className="w-3.5 h-3.5" /><span>เหมาะสม (Optimal)</span></>
+                    <><Droplets className={`w-3.5 h-3.5 ${humStatus.iconClass}`} /><span className={`${humStatus.textClass} font-medium`}>{humStatus.label}</span></>
                   )}
                 </div>
               </div>
@@ -2338,7 +2428,9 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                   connectionState.color === 'green' ? 'bg-green-500 animate-pulse' :
                   connectionState.color === 'amber' ? 'bg-amber-500' : 'bg-red-500'
                 }`}></div>
-                <span className="text-xs font-bold text-slate-700">{connectionState.label}</span>
+                <span className="text-xs font-bold text-slate-700 truncate max-w-[200px]">
+                  {settings.deviceName || 'Sensor 1'} • {connectionState.label}
+                </span>
               </div>
               <button 
                 onClick={() => setShowCodeModal(true)}
