@@ -4,7 +4,8 @@ import {
 } from 'recharts';
 import { 
   Thermometer, Droplets, Settings, Activity, AlertTriangle, Cpu, Download, 
-  Copy, Check, Code, Wifi, WifiOff, AlertCircle, Info, RefreshCw, Power, Zap, Clock, ShieldCheck, CheckCircle2, Trash2 
+  Copy, Check, Code, Wifi, WifiOff, AlertCircle, Info, RefreshCw, Power, Zap, Clock, ShieldCheck, CheckCircle2, Trash2,
+  Sun, Cloud, CloudRain, CloudLightning, CloudSnow, CloudFog, CloudDrizzle, MapPin, Navigation
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { initializeApp } from 'firebase/app';
@@ -23,6 +24,13 @@ export const ROOM_STANDARDS = {
   baby_room: { name: 'ห้องเด็กอ่อน (Baby)', tempMin: 22, tempMax: 24, humMin: 40, humMax: 60, desc: 'ควบคุมอุณหภูมิคงที่' },
 };
 type RoomType = keyof typeof ROOM_STANDARDS;
+
+interface OutdoorWeather {
+  temp: number;
+  humidity: number;
+  weatherCode: number;
+  locationName: string;
+}
 
 interface SensorData {
   id: string;
@@ -59,6 +67,8 @@ export default function App() {
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [isUpdatingConfig, setIsUpdatingConfig] = useState(false);
+  const [outdoorWeather, setOutdoorWeather] = useState<OutdoorWeather | null>(null);
+  const [outdoorLoading, setOutdoorLoading] = useState(false);
 
   // Quick preset helper for intraday time periods
   const handleSelectIntradayPreset = (preset: 'today' | 'morning' | 'afternoon' | 'evening') => {
@@ -296,6 +306,51 @@ export default function App() {
     return () => unsubscribe();
   }, [timeRange, filterStartTime, filterEndTime]);
 
+  // Fetch Outdoor Weather from Open-Meteo
+  useEffect(() => {
+    const fetchWeather = async () => {
+      setOutdoorLoading(true);
+      try {
+        let lat = 13.7563;
+        let lon = 100.5018;
+        let locName = 'กรุงเทพมหานคร';
+
+        try {
+          const geoRes = await fetch('https://ipapi.co/json/');
+          if (geoRes.ok) {
+            const geoData = await geoRes.json();
+            if (geoData.latitude && geoData.longitude) {
+              lat = geoData.latitude;
+              lon = geoData.longitude;
+              locName = geoData.city || locName;
+            }
+          }
+        } catch (e) {
+          console.log('IP Geolocation failed, using default Bangkok coordinates');
+        }
+
+        const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,weather_code`);
+        if (weatherRes.ok) {
+          const weatherData = await weatherRes.json();
+          setOutdoorWeather({
+            temp: weatherData.current.temperature_2m,
+            humidity: weatherData.current.relative_humidity_2m,
+            weatherCode: weatherData.current.weather_code,
+            locationName: locName
+          });
+        }
+      } catch (e) {
+        console.error("Failed to fetch outdoor weather", e);
+      } finally {
+        setOutdoorLoading(false);
+      }
+    };
+
+    fetchWeather();
+    const interval = setInterval(fetchWeather, 15 * 60 * 1000); // refresh every 15 mins
+    return () => clearInterval(interval);
+  }, []);
+
   // 2. Fetch & Listen to real-time Device Settings from Firestore
   useEffect(() => {
     const unsubscribe = onSnapshot(doc(db, 'device_settings', 'config'), (docSnap) => {
@@ -490,6 +545,19 @@ export default function App() {
     if (h < currentRoom.humMin) return { label: `แห้งเกินไป (< ${currentRoom.humMin}%)`, iconClass: 'text-amber-600', textClass: 'text-amber-600', err: false, warn: true };
     return { label: `เหมาะสมสำหรับ${currentRoom.name.split(' ')[0]}`, iconClass: 'text-teal-600', textClass: 'text-teal-700', err: false, warn: false };
   }, [latestData, currentRoom]);
+
+  // Weather Helper
+  const getWeatherIconAndLabel = (code: number) => {
+    if (code === 0) return { label: 'ฟ้าใส', icon: Sun, color: 'text-amber-500' };
+    if (code === 1 || code === 2 || code === 3) return { label: 'มีเมฆบางส่วน', icon: Cloud, color: 'text-slate-400' };
+    if (code === 45 || code === 48) return { label: 'มีหมอก', icon: CloudFog, color: 'text-slate-400' };
+    if (code >= 51 && code <= 55) return { label: 'ฝนปรอยๆ', icon: CloudDrizzle, color: 'text-blue-400' };
+    if (code >= 61 && code <= 65) return { label: 'ฝนตก', icon: CloudRain, color: 'text-blue-500' };
+    if (code >= 71 && code <= 77) return { label: 'หิมะตก', icon: CloudSnow, color: 'text-sky-300' };
+    if (code >= 80 && code <= 82) return { label: 'ฝนตกหนัก', icon: CloudRain, color: 'text-blue-600' };
+    if (code >= 95) return { label: 'พายุฝนฟ้าคะนอง', icon: CloudLightning, color: 'text-purple-600' };
+    return { label: 'สภาพอากาศ', icon: Cloud, color: 'text-slate-400' };
+  };
 
   // Connection State
   const connectionState = useMemo(() => {
@@ -2439,6 +2507,61 @@ const char* WIFI_PASSWORD = "รหัสผ่าน_WiFi_บ้านของ
                 <Code className="w-3.5 h-3.5" /> โค้ด ESP32
               </button>
             </div>
+          </div>
+
+          {/* Outdoor Weather Widget */}
+          <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm shrink-0 flex items-center justify-between flex-wrap gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center shrink-0">
+                {outdoorLoading ? <RefreshCw className="w-5 h-5 text-slate-400 animate-spin" /> : 
+                 outdoorWeather ? (() => {
+                   const weather = getWeatherIconAndLabel(outdoorWeather.weatherCode);
+                   const Icon = weather.icon;
+                   return <Icon className={`w-5 h-5 ${weather.color}`} />;
+                 })() : <Cloud className="w-5 h-5 text-slate-400" />
+                }
+              </div>
+              <div>
+                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                  <MapPin className="w-3 h-3" /> สภาพอากาศภายนอก (อ้างอิงจาก Internet)
+                </h2>
+                {outdoorWeather ? (
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="font-bold text-slate-800 text-sm">
+                      {outdoorWeather.locationName}
+                    </span>
+                    <span className="text-slate-300">|</span>
+                    <span className="text-xs font-semibold text-slate-600">
+                      {getWeatherIconAndLabel(outdoorWeather.weatherCode).label}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-sm font-medium text-slate-600 mt-0.5">
+                    {outdoorLoading ? 'กำลังโหลดข้อมูล...' : 'ไม่สามารถดึงข้อมูลได้'}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {outdoorWeather && (
+              <div className="flex items-center gap-4 sm:gap-6 bg-slate-50 px-4 py-2 rounded-xl border border-slate-100">
+                <div className="flex items-center gap-2">
+                  <Thermometer className="w-4 h-4 text-blue-500" />
+                  <div>
+                    <div className="text-[10px] font-semibold text-slate-500 leading-none mb-1">อุณหภูมิ</div>
+                    <div className="font-bold text-slate-800 leading-none">{outdoorWeather.temp.toFixed(1)}<span className="text-xs text-slate-500 font-medium ml-0.5">°C</span></div>
+                  </div>
+                </div>
+                <div className="w-px h-8 bg-slate-200"></div>
+                <div className="flex items-center gap-2">
+                  <Droplets className="w-4 h-4 text-teal-500" />
+                  <div>
+                    <div className="text-[10px] font-semibold text-slate-500 leading-none mb-1">ความชื้น</div>
+                    <div className="font-bold text-slate-800 leading-none">{outdoorWeather.humidity.toFixed(1)}<span className="text-xs text-slate-500 font-medium ml-0.5">%</span></div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Chart Time Filter Control Bar */}
