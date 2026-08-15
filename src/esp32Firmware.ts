@@ -34,6 +34,7 @@ export function getEsp32Firmware(settings: {
 #include <SimpleDHT.h>
 #include <Wire.h> 
 #include <time.h> 
+#include <math.h>
 #include "soc/soc.h" 
 #include "soc/rtc_cntl_reg.h" 
 
@@ -41,10 +42,13 @@ export function getEsp32Firmware(settings: {
 const char* WIFI_SSID = "Mai_home_2.4G"; 
 const char* WIFI_PASSWORD = "0909142651"; 
 
-// --- 1. การเชื่อมต่อ Server & Cloud ---
+// --- ชื่อจุดติดตั้งอุปกรณ์ (เช่น MY BEDROOM, BEDROOM, LIVING ROOM) ---
+const char* ROOM_NAME = "MY BEDROOM"; 
+
+// --- 1. การเชื่อมต่อ Server & Cloud Firestore ---
 const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-client-0516953163/databases/ai-studio-iotsensordashboa-6c74a260-d381-44d8-ae58-a587051c2d98/documents/sensor_data?key=AIzaSyCXLGKCPAStDBt0RTcCUdX3ew4c_uB6oxs";
 
-// --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ ---
+// --- 2. ขา Pin และส่วนควบคุมฮาร์ดแวร์ CYD 2.8" (ESP32-2432S028R) ---
 #define XPT2046_IRQ 36
 #define XPT2046_MOSI 32
 #define XPT2046_MISO 39
@@ -52,23 +56,46 @@ const char* serverUrl = "https://firestore.googleapis.com/v1/projects/gen-lang-c
 #define XPT2046_CS 33
 #define TFT_BL 21 
 
+// ใช้ VSPI บัส และ XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ) ตามโค้ดที่คุณเทสผ่าน 100%
 SPIClass touchSpi = SPIClass(VSPI);
-XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
+XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 TFT_eSPI tft = TFT_eSPI();
 
-// --- 3. จานสีธีม Dark Dashboard ---
-#define COLOR_BG tft.color565(18, 22, 28) 
-#define COLOR_CARD_LINE tft.color565(42, 50, 64) 
-#define COLOR_ORANGE tft.color565(255, 95, 45) 
-#define COLOR_CYAN tft.color565(50, 180, 255) 
-#define COLOR_MUTED tft.color565(140, 150, 165) 
-#define COLOR_BTN_SLEEP tft.color565(30, 60, 105)
-#define COLOR_WEATHER_BG tft.color565(15, 28, 48)
-#define COLOR_GOOD tft.color565(50, 220, 120)
-#define COLOR_WARN tft.color565(255, 190, 40)
+// --- 3. จานสีธีม Modern Dark Dashboard & Smart Clock ---
+#define COLOR_BG          tft.color565(18, 22, 28) 
+#define COLOR_CARD_LINE   tft.color565(42, 50, 64) 
+#define COLOR_ORANGE      tft.color565(255, 95, 45) 
+#define COLOR_CYAN        tft.color565(50, 180, 255) 
+#define COLOR_MUTED       tft.color565(140, 150, 165) 
+#define COLOR_BTN_SLEEP   tft.color565(25, 45, 80)
+#define COLOR_BTN_CLOCK   tft.color565(35, 80, 150)
+#define COLOR_WEATHER_BG  tft.color565(15, 28, 48)
+#define COLOR_GOOD        tft.color565(50, 220, 120)
+#define COLOR_WARN        tft.color565(255, 190, 40)
+
+// จานสีโหมดนาฬิกาตั้งโต๊ะ (Smart Clock Face)
+#define COLOR_CLOCK_BG    tft.color565(16, 20, 28)
+#define COLOR_ARC_CYAN    tft.color565(45, 215, 255)
+#define COLOR_ARC_ORANGE  tft.color565(255, 130, 45)
+#define COLOR_ARC_TRACK   tft.color565(32, 40, 52)
+#define COLOR_CLOCK_TEXT  tft.color565(245, 248, 255)
+
+// สีตัวเลขนาฬิกา (ชั่วโมงกับนาทีคนละสี สวยงามโดดเด่น ไม่กลืนกัน)
+#define COLOR_HOUR        tft.color565(60, 225, 255) // สีฟ้า Cyan สว่างสดใส
+#define COLOR_COLON       tft.color565(255, 255, 255) // จุดกระพริบสีขาว
+#define COLOR_MINUTE      tft.color565(255, 205, 50)  // สีทองสว่าง Amber Gold สดใส
+
+// โหมดหน้าจอ
+enum ScreenMode {
+  SCREEN_DASHBOARD = 0,
+  SCREEN_CLOCK = 1
+};
+ScreenMode currentScreen = SCREEN_DASHBOARD;
 
 // --- 4. ตัวแปรสถานะระบบ ---
 float temp = 0, humi = 0;
+float prevTempClock = -999.0, prevHumiClock = -999.0; // เก็บค่าเก่าเพื่อวาดเฉพาะตอนค่าเปลี่ยน (แก้จอกระพริบ 100%)
+String prevClockTime = "";
 bool isSensorError = true;
 int lastCloudCode = 0;
 int sendIntervalSec = 15; 
@@ -79,6 +106,7 @@ unsigned long lastClockUpdate = 0;
 unsigned long lastWeatherUpdate = 0;
 bool isScreenSleep = false;          // สถานะโหมดพักหน้าจอ
 unsigned long lastTouchTime = 0;     // ป้องกันการกดย้ำ (Debounce)
+String lastRenderedTime = "";
 
 // สภาพอากาศภายนอก (${settings.weatherLocation || 'ปราจีนบุรี'})
 float outTemp = 0.0;
@@ -306,194 +334,419 @@ void fetchOutdoorWeather() {
 }
 
 // ==========================================
-// ส่วนที่ 7: หน้าจอ UI ดีไซน์ Dark Mode
+// ฟังก์ชันวาดเส้นโค้งเกจแบบนุ่มนวล (Arc Gauge Helper)
+// ==========================================
+void drawCurvedArc(int cx, int cy, int r, int thickness, float startDeg, float endDeg, uint16_t color) {
+  for (float a = startDeg; a <= endDeg; a += 1.2) {
+    float rad = a * 0.0174532925;
+    float cosA = cos(rad);
+    float sinA = sin(rad);
+    for (int t = 0; t < thickness; t++) {
+      int px = cx + (int)((r + t) * cosA);
+      int py = cy + (int)((r + t) * sinA);
+      if (px >= 0 && px < 320 && py >= 0 && py < 240) {
+        tft.drawPixel(px, py, color);
+      }
+    }
+  }
+}
+
+// ==========================================
+// ส่วนที่ 7: หน้าจอ UI ดีไซน์ Dark Mode (Dashboard) - ขยายตัวเลขอุณหภูมิ & ความชื้นใหญ่ชัดเจน
 // ==========================================
 void drawUI() {
   tft.fillScreen(COLOR_BG);
   
-  // Header bar
-  tft.fillRect(0, 0, 320, 32, tft.color565(26, 32, 42));
-  tft.drawLine(0, 32, 320, 32, COLOR_CARD_LINE);
+  // Header bar แสดงชื่อจุดติดตั้ง เช่น "MY BEDROOM"
+  tft.fillRect(0, 0, 320, 28, tft.color565(24, 30, 40));
+  tft.drawLine(0, 28, 320, 28, COLOR_CARD_LINE);
   
-  tft.setTextColor(TFT_WHITE, tft.color565(26, 32, 42));
+  tft.setTextColor(TFT_WHITE, tft.color565(24, 30, 40));
   tft.setTextSize(2);
-  tft.drawString("ENVIRONMENT", 10, 8);
+  tft.drawString(ROOM_NAME, 8, 6);
   
   // Room Type Tag on Screen
   tft.setTextSize(1);
-  tft.setTextColor(COLOR_CYAN, tft.color565(26, 32, 42));
-  tft.drawString("[ ${roomLabel} ]", 175, 12);
+  tft.setTextColor(COLOR_CYAN, tft.color565(24, 30, 40));
+  tft.drawString("[ ${roomLabel} ]", 175, 10);
   
   // Time on Header
   struct tm timeinfo;
   if (getLocalTime(&timeinfo)) {
     char timeStr[10];
     strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
-    tft.setTextColor(COLOR_MUTED, tft.color565(26, 32, 42));
+    tft.setTextColor(COLOR_MUTED, tft.color565(24, 30, 40));
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(timeStr, 310, 10);
+    tft.drawString(timeStr, 312, 8);
     tft.setTextDatum(TL_DATUM);
   }
 
-  // Cards layout
-  tft.drawRoundRect(10, 40, 145, 115, 8, COLOR_CARD_LINE);
-  tft.drawRoundRect(165, 40, 145, 115, 8, COLOR_CARD_LINE);
+  // Cards layout (กว้างขึ้นและใหญ่ขึ้น)
+  tft.drawRoundRect(6, 34, 150, 126, 8, COLOR_CARD_LINE);
+  tft.drawRoundRect(164, 34, 150, 126, 8, COLOR_CARD_LINE);
   
   tft.setTextColor(COLOR_ORANGE, COLOR_BG);
   tft.setTextSize(1);
-  tft.drawString("TEMPERATURE", 22, 50);
+  tft.drawString("TEMPERATURE", 16, 42);
   
   tft.setTextColor(COLOR_CYAN, COLOR_BG);
-  tft.drawString("HUMIDITY", 177, 50);
+  tft.drawString("HUMIDITY", 174, 42);
   
-  // Outdoor Weather Card
-  tft.fillRoundRect(10, 163, 195, 68, 6, COLOR_WEATHER_BG);
-  tft.drawRoundRect(10, 163, 195, 68, 6, COLOR_CARD_LINE);
+  // 1. Outdoor Weather Card (ซ้ายล่าง)
+  tft.fillRoundRect(6, 166, 114, 68, 6, COLOR_WEATHER_BG);
+  tft.drawRoundRect(6, 166, 114, 68, 6, COLOR_CARD_LINE);
   tft.setTextColor(COLOR_MUTED, COLOR_WEATHER_BG);
-  tft.drawString("OUTDOOR (" + outCity + ")", 18, 170);
+  tft.drawString("OUTDOOR", 12, 172);
   
-  // Sleep / Wake Button Card
-  tft.fillRoundRect(213, 163, 97, 68, 6, COLOR_BTN_SLEEP);
-  tft.drawRoundRect(213, 163, 97, 68, 6, tft.color565(70, 120, 200));
+  // 2. ปุ่ม CLOCK (ตรงกลางล่าง - กดเพื่อเข้าหน้านาฬิกาตามภาพ)
+  tft.fillRoundRect(126, 166, 92, 68, 6, COLOR_BTN_CLOCK);
+  tft.drawRoundRect(126, 166, 92, 68, 6, tft.color565(75, 150, 245));
+  tft.setTextColor(TFT_WHITE, COLOR_BTN_CLOCK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(2);
+  tft.drawString("CLOCK", 172, 190);
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_CYAN, COLOR_BTN_CLOCK);
+  tft.drawString("DESK MODE", 172, 214);
+  tft.setTextDatum(TL_DATUM);
+
+  // 3. ปุ่ม SLEEP (ขวาล่าง - กดเพื่อพักหน้าจอ)
+  tft.fillRoundRect(224, 166, 90, 68, 6, COLOR_BTN_SLEEP);
+  tft.drawRoundRect(224, 166, 90, 68, 6, tft.color565(70, 110, 180));
   tft.setTextColor(TFT_WHITE, COLOR_BTN_SLEEP);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString("SLEEP", 261, 190);
+  tft.setTextSize(2);
+  tft.drawString("SLEEP", 269, 190);
   tft.setTextSize(1);
-  tft.setTextColor(COLOR_CYAN, COLOR_BTN_SLEEP);
-  tft.drawString("TOUCH SCREEN", 261, 208);
+  tft.setTextColor(COLOR_MUTED, COLOR_BTN_SLEEP);
+  tft.drawString("TOUCH OFF", 269, 214);
   tft.setTextDatum(TL_DATUM);
 }
 
 void drawSensorValues() {
-  if (isScreenSleep) return;
+  if (isScreenSleep || currentScreen != SCREEN_DASHBOARD) return;
   
-  // Temperature Card
-  tft.fillRect(15, 70, 135, 75, COLOR_BG);
+  // Temperature Card - ตัวเลขใหญ่ยักษ์ TextSize 5 ชัดเจน
+  tft.fillRect(10, 58, 142, 98, COLOR_BG);
   if (isSensorError || temp == 0.0) {
     tft.setTextColor(COLOR_WARN, COLOR_BG);
-    tft.setTextSize(3);
-    tft.drawString("0.0", 30, 80);
+    tft.setTextSize(4);
+    tft.drawString("--.-", 24, 72);
     tft.setTextSize(1);
-    tft.drawString("CHECK SENSOR", 30, 115);
+    tft.drawString("CHECK SENSOR", 24, 130);
   } else {
     tft.setTextColor(TFT_WHITE, COLOR_BG);
-    tft.setTextSize(4);
-    tft.drawFloat(temp, 1, 22, 75);
+    tft.setTextSize(5); // ขนาดใหญ่พิเศษ 5 คมชัดเต็มตา
+    tft.drawFloat(temp, 1, 14, 62);
+    
     tft.setTextSize(2);
     tft.setTextColor(COLOR_ORANGE, COLOR_BG);
-    tft.drawString("\`C", 125, 75);
+    tft.drawString("\`C", 126, 64);
     
-    // Status text
+    // Status text & Bar
     tft.setTextSize(1);
     if (temp > ${settings.maxTemp}) {
+      tft.fillRect(14, 132, 134, 4, COLOR_WARN);
       tft.setTextColor(COLOR_WARN, COLOR_BG);
-      tft.drawString("HIGH TEMP", 25, 120);
+      tft.drawString("HIGH TEMP ALERT", 16, 118);
     } else {
+      tft.fillRect(14, 132, 134, 4, COLOR_GOOD);
       tft.setTextColor(COLOR_GOOD, COLOR_BG);
-      tft.drawString("OPTIMAL", 25, 120);
+      tft.drawString("OPTIMAL STATUS", 16, 118);
     }
   }
 
-  // Humidity Card
-  tft.fillRect(170, 70, 135, 75, COLOR_BG);
+  // Humidity Card - ตัวเลขใหญ่ยักษ์ TextSize 5 ชัดเจน
+  tft.fillRect(168, 58, 142, 98, COLOR_BG);
   if (isSensorError || humi == 0.0) {
     tft.setTextColor(COLOR_WARN, COLOR_BG);
-    tft.setTextSize(3);
-    tft.drawString("0.0", 185, 80);
+    tft.setTextSize(4);
+    tft.drawString("--.-", 182, 72);
     tft.setTextSize(1);
-    tft.drawString("CHECK SENSOR", 185, 115);
+    tft.drawString("CHECK SENSOR", 182, 130);
   } else {
     tft.setTextColor(TFT_WHITE, COLOR_BG);
-    tft.setTextSize(4);
-    tft.drawFloat(humi, 1, 175, 75);
+    tft.setTextSize(5); // ขนาดใหญ่พิเศษ 5 คมชัดเต็มตา
+    tft.drawFloat(humi, 1, 172, 62);
+    
     tft.setTextSize(2);
     tft.setTextColor(COLOR_CYAN, COLOR_BG);
-    tft.drawString("%", 285, 75);
+    tft.drawString("%", 286, 64);
     
-    // Status text
+    // Status text & Bar
     tft.setTextSize(1);
     if (humi > ${settings.maxHum}) {
+      tft.fillRect(172, 132, 134, 4, COLOR_WARN);
       tft.setTextColor(COLOR_WARN, COLOR_BG);
-      tft.drawString("HIGH HUMIDITY", 180, 120);
+      tft.drawString("HIGH HUMIDITY", 174, 118);
     } else {
+      tft.fillRect(172, 132, 134, 4, COLOR_GOOD);
       tft.setTextColor(COLOR_GOOD, COLOR_BG);
-      tft.drawString("OPTIMAL", 180, 120);
+      tft.drawString("OPTIMAL STATUS", 174, 118);
     }
   }
 
   // Outdoor Weather
-  tft.fillRect(15, 185, 185, 40, COLOR_WEATHER_BG);
+  tft.fillRect(10, 186, 106, 44, COLOR_WEATHER_BG);
   tft.setTextSize(2);
   tft.setTextColor(TFT_WHITE, COLOR_WEATHER_BG);
-  tft.drawFloat(outTemp, 1, 18, 188);
-  tft.drawString("\`C", 72, 188);
-  
-  tft.drawFloat(outHumi, 0, 115, 188);
-  tft.drawString("%", 155, 188);
+  tft.drawFloat(outTemp, 1, 12, 188);
+  tft.drawString("\`C", 62, 188);
   
   tft.setTextSize(1);
   tft.setTextColor(COLOR_MUTED, COLOR_WEATHER_BG);
-  tft.drawString(outCondition, 18, 212);
+  tft.drawString(outCondition.substring(0, 11), 12, 212);
+}
+
+// ==========================================
+// ส่วนที่ 8: หน้าจอโหมดนาฬิกาตั้งโต๊ะอัจฉริยะ (Smart Clock Face)
+// ==========================================
+void updateClockDigits(bool forceRedraw = false) {
+  if (isScreenSleep || currentScreen != SCREEN_CLOCK) return;
+  
+  struct tm timeinfo;
+  char hourStr[4] = "12";
+  char minStr[4] = "00";
+  if (getLocalTime(&timeinfo)) {
+    strftime(hourStr, sizeof(hourStr), "%H", &timeinfo);
+    strftime(minStr, sizeof(minStr), "%M", &timeinfo);
+  }
+  
+  String currentFormatted = String(hourStr) + ":" + String(minStr);
+  if (!forceRedraw && currentFormatted == prevClockTime) return;
+  prevClockTime = currentFormatted;
+
+  // เคลียร์เฉพาะพื้นที่ตัวเลขตรงกลาง (ไม่มีการกระพริบ fillScreen)
+  tft.fillRect(48, 62, 224, 62, COLOR_CLOCK_BG);
+
+  // วาดชั่วโมง (สีฟ้าสดใส Cyan)
+  tft.setTextColor(COLOR_HOUR, COLOR_CLOCK_BG);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextSize(6);
+  tft.drawString(String(hourStr), 145, 66);
+
+  // วาดจุดโคลอนคั่นเวลา (สีขาว White)
+  tft.setTextColor(COLOR_COLON, COLOR_CLOCK_BG);
+  tft.setTextDatum(TC_DATUM);
+  tft.drawString(":", 160, 64);
+
+  // วาดนาที (สีทองอำพันสดใส Amber Gold)
+  tft.setTextColor(COLOR_MINUTE, COLOR_CLOCK_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(String(minStr), 175, 66);
+  
+  tft.setTextDatum(TL_DATUM);
+}
+
+void updateClockSensors(bool forceRedraw = false) {
+  if (isScreenSleep || currentScreen != SCREEN_CLOCK) return;
+
+  // ตรวจสอบว่าค่าเปลี่ยนหรือไม่ ถ้าไม่เปลี่ยนไม่ต้องวาดใหม่ (ป้องกันจอกระพริบ)
+  if (!forceRedraw && fabs(temp - prevTempClock) < 0.1 && fabs(humi - prevHumiClock) < 0.5) return;
+  prevTempClock = temp;
+  prevHumiClock = humi;
+
+  // 1. อัปเดตเส้นโค้งฝั่งซ้าย (Temperature Arc & Indicator)
+  drawCurvedArc(160, 105, 105, 5, 125, 235, COLOR_CLOCK_BG); // ลบของเดิม
+  drawCurvedArc(160, 105, 105, 3, 125, 235, COLOR_ARC_TRACK);
+  
+  float tempClamped = constrain(temp, 0.0, 50.0);
+  float leftEndDeg = 235.0 - ((tempClamped / 50.0) * 105.0);
+  drawCurvedArc(160, 105, 105, 4, leftEndDeg, 235, COLOR_ARC_CYAN);
+  
+  float radL = leftEndDeg * 0.0174532925;
+  int indLx = 160 + (int)(106 * cos(radL));
+  int indLy = 105 + (int)(106 * sin(radL));
+  tft.fillCircle(indLx, indLy, 5, COLOR_ARC_CYAN);
+  tft.drawCircle(indLx, indLy, 5, TFT_WHITE);
+  tft.fillCircle(indLx, indLy, 2, COLOR_CLOCK_BG);
+
+  // ตัวเลขอุณหภูมิซ้าย
+  tft.fillRect(2, 92, 60, 40, COLOR_CLOCK_BG);
+  tft.setTextColor(COLOR_ARC_CYAN, COLOR_CLOCK_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.drawString("INDOOR", 32, 98);
+  tft.setTextSize(2);
+  tft.drawString(String(temp, 1) + "\`C", 32, 116);
+
+  // 2. อัปเดตเส้นโค้งฝั่งขวา (Humidity Arc & Indicator)
+  drawCurvedArc(160, 105, 105, 5, -55, 55, COLOR_CLOCK_BG); // ลบของเดิม
+  drawCurvedArc(160, 105, 105, 3, -55, 55, COLOR_ARC_TRACK);
+  
+  float humClamped = constrain(humi, 0.0, 100.0);
+  float rightEndDeg = -55.0 + ((humClamped / 100.0) * 110.0);
+  drawCurvedArc(160, 105, 105, 4, -55, rightEndDeg, COLOR_ARC_ORANGE);
+  
+  float radR = rightEndDeg * 0.0174532925;
+  int indRx = 160 + (int)(106 * cos(radR));
+  int indRy = 105 + (int)(106 * sin(radR));
+  tft.fillCircle(indRx, indRy, 4, COLOR_ARC_ORANGE);
+  tft.drawCircle(indRx, indRy, 4, TFT_WHITE);
+
+  // ตัวเลขความชื้นขวา
+  tft.fillRect(258, 92, 60, 40, COLOR_CLOCK_BG);
+  tft.setTextColor(COLOR_ARC_ORANGE, COLOR_CLOCK_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.drawString("HUMIDITY", 288, 98);
+  tft.setTextSize(2);
+  tft.drawString(String((int)humi) + "%", 288, 116);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void drawClockWeatherInfo() {
+  if (isScreenSleep || currentScreen != SCREEN_CLOCK) return;
+  
+  tft.fillRect(60, 138, 200, 52, COLOR_CLOCK_BG);
+  
+  // สัญลักษณ์สภาพอากาศจำลอง
+  tft.fillCircle(105, 155, 8, tft.color565(255, 195, 35));
+  tft.fillRoundRect(95, 157, 28, 14, 5, tft.color565(60, 75, 95));
+  tft.fillCircle(102, 157, 7, tft.color565(60, 75, 95));
+  tft.fillCircle(114, 155, 8, tft.color565(60, 75, 95));
+
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_WHITE, COLOR_CLOCK_BG);
+  tft.setTextSize(3);
+  tft.drawString(String(outTemp, 0) + "\`C", 132, 155);
+  
+  tft.setTextColor(COLOR_MUTED, COLOR_CLOCK_BG);
+  tft.setTextSize(1);
+  tft.drawString(outCondition + " (" + outCity.substring(0, 8) + ")", 95, 180);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void drawClockScreen() {
+  tft.fillScreen(COLOR_CLOCK_BG);
+  
+  // 1. วาดเส้นขอบตกแต่งด้านข้าง
+  tft.drawFastVLine(0, 0, 240, tft.color565(30, 40, 55));
+  tft.drawFastVLine(319, 0, 240, tft.color565(30, 40, 55));
+  
+  // 2. แถบข้อมูลด้านบน (ชื่อจุดติดตั้ง & วันที่)
+  struct tm timeinfo;
+  char dateStr[30] = "ESP32 SMART CLOCK";
+  if (getLocalTime(&timeinfo)) {
+    strftime(dateStr, sizeof(dateStr), "%A, %d %b", &timeinfo);
+  }
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_CYAN, COLOR_CLOCK_BG);
+  tft.drawString(ROOM_NAME, 160, 12);
+  tft.setTextColor(COLOR_MUTED, COLOR_CLOCK_BG);
+  tft.drawString(dateStr, 160, 25);
+  tft.setTextDatum(TL_DATUM);
+
+  // 3. วาดเกจและค่าเซนเซอร์
+  updateClockSensors(true);
+
+  // 4. วาดตัวเลขนาฬิกา (ชั่วโมง Cyan / นาที Amber-Gold)
+  updateClockDigits(true);
+
+  // 5. สภาพอากาศภายนอก
+  drawClockWeatherInfo();
+
+  // 6. ปุ่มเมนูสัมผัสแถบล่าง
+  tft.fillRoundRect(20, 205, 130, 28, 5, tft.color565(25, 35, 50));
+  tft.drawRoundRect(20, 205, 130, 28, 5, tft.color565(50, 70, 100));
+  tft.setTextColor(COLOR_CYAN, tft.color565(25, 35, 50));
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.drawString("< DASHBOARD", 85, 219);
+
+  tft.fillRoundRect(170, 205, 130, 28, 5, COLOR_BTN_SLEEP);
+  tft.drawRoundRect(170, 205, 130, 28, 5, tft.color565(60, 100, 160));
+  tft.setTextColor(TFT_WHITE, COLOR_BTN_SLEEP);
+  tft.drawString("SLEEP >", 235, 219);
+  tft.setTextDatum(TL_DATUM);
 }
 
 void drawStatusCard() {
   if (isScreenSleep) return;
-  // Sync bar
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    char timeStr[10];
-    strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
-    tft.fillRect(240, 8, 70, 20, tft.color565(26, 32, 42));
-    tft.setTextColor(COLOR_MUTED, tft.color565(26, 32, 42));
-    tft.setTextDatum(TR_DATUM);
-    tft.drawString(timeStr, 310, 10);
-    tft.setTextDatum(TL_DATUM);
+  if (currentScreen == SCREEN_DASHBOARD) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      char timeStr[10];
+      strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+      tft.fillRect(240, 8, 70, 20, tft.color565(26, 32, 42));
+      tft.setTextColor(COLOR_MUTED, tft.color565(26, 32, 42));
+      tft.setTextDatum(TR_DATUM);
+      tft.drawString(timeStr, 310, 10);
+      tft.setTextDatum(TL_DATUM);
+    }
+  } else if (currentScreen == SCREEN_CLOCK) {
+    updateClockDigits();
   }
 }
 
 // ==========================================
-// ส่วนที่ 8: ฟังก์ชันตรวจสอบการสัมผัส (Touch Sleep / Wake)
+// ส่วนที่ 9: ฟังก์ชันตรวจสอบการสัมผัส (Touch Sleep / Wake / Mode Switch)
 // ==========================================
 void checkTouch() {
-  if (touch.tirqPin && !touch.tirqGround()) {
-    if (!touch.touched()) return;
-  }
+  if (!ts.touched()) return;
   
-  if (touch.touched()) {
-    unsigned long now = millis();
-    // ป้องกันการกดย้ำ (Debounce 600ms)
-    if (now - lastTouchTime < 600) return;
-    lastTouchTime = now;
+  TS_Point p = ts.getPoint();
 
-    if (isScreenSleep) {
-      // ปลุกหน้าจอให้ติด
-      isScreenSleep = false;
-      digitalWrite(TFT_BL, HIGH);
+  unsigned long now = millis();
+  // ป้องกันการกดย้ำ (Debounce 350ms)
+  if (now - lastTouchTime < 350) return;
+  lastTouchTime = now;
+
+  if (isScreenSleep) {
+    // ปลุกหน้าจอให้ติด
+    isScreenSleep = false;
+    digitalWrite(TFT_BL, HIGH);
+    if (currentScreen == SCREEN_CLOCK) {
+      drawClockScreen();
+    } else {
       drawUI();
       drawSensorValues();
       drawStatusCard();
-    } else {
-      TS_Point p = touch.getPoint();
-      // แปลงพิกัด CYD 2.8 นิ้ว
-      int x = map(p.x, 3800, 200, 0, 320);
-      int y = map(p.y, 3800, 200, 0, 240);
+    }
+  } else {
+    // แปลงพิกัดตามสูตรที่ทดสอบผ่านจริง 100%
+    int x = map(p.x, 200, 3700, 0, 320);
+    int y = map(p.y, 240, 3800, 0, 240);
+    x = constrain(x, 0, 320);
+    y = constrain(y, 0, 240);
 
-      // ถ้ากดที่ปุ่ม SLEEP (ขวาล่าง) หรือแตะที่ใดก็ได้
-      if (x >= 210 && y >= 160) {
+    if (currentScreen == SCREEN_DASHBOARD) {
+      // แตะปุ่ม CLOCK (กลางล่าง: x: 120..220, y >= 155)
+      if (x >= 120 && x <= 222 && y >= 155) {
+        currentScreen = SCREEN_CLOCK;
+        drawClockScreen();
+      }
+      // แตะปุ่ม SLEEP (ขวาล่าง: x >= 223, y >= 155)
+      else if (x >= 223 && y >= 155) {
         isScreenSleep = true;
-        digitalWrite(TFT_BL, LOW); // ดับไฟหน้าจอทันที แต่ระบบยังคงทำงานต่อเนื่อง
+        digitalWrite(TFT_BL, LOW); // ดับไฟหน้าจอทันที
+      }
+    } else if (currentScreen == SCREEN_CLOCK) {
+      // แตะปุ่ม SLEEP ในหน้านาฬิกา (ขวาล่าง: x >= 165 && y >= 190)
+      if (x >= 165 && y >= 190) {
+        isScreenSleep = true;
+        digitalWrite(TFT_BL, LOW);
+      }
+      // แตะปุ่ม DASHBOARD หรือแตะส่วนใดๆ บนหน้าจอเพื่อกลับหน้าแดชบอร์ด
+      else {
+        currentScreen = SCREEN_DASHBOARD;
+        drawUI();
+        drawSensorValues();
+        drawStatusCard();
       }
     }
+  }
 
-    // รอให้ปล่อยมือก่อน เพื่อไม่ให้เกิดการสลับโหมดซ้ำ
-    while (touch.touched()) {
-      delay(20);
-    }
+  // รอจนกว่าจะยกนิ้วออก ป้องกันการเด้งไปมา
+  unsigned long releaseTimer = millis();
+  while (ts.touched() && (millis() - releaseTimer < 600)) {
+    delay(20);
   }
 }
 
 // ==========================================
-// ส่วนที่ 9: Setup & Loop หลัก
+// ส่วนที่ 10: Setup & Loop หลัก
 // ==========================================
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ป้องกันบอร์ดรีสตาร์ท
@@ -508,19 +761,23 @@ void setup() {
   tft.setRotation(1);
   tft.fillScreen(COLOR_BG);
 
-  // ตั้งค่าระบบสัมผัส Touch
+  // ตั้งค่าระบบสัมผัส Touch ตามโค้ดที่เทสผ่าน
   touchSpi.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
-  touch.begin(touchSpi);
-  touch.setRotation(1);
+  ts.begin(touchSpi);
+  ts.setRotation(1);
 
-  // แสดงหน้าจอเริ่มระบบ
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextSize(2);
-  tft.drawString("SENSORFLOW IOT", 160, 90);
-  tft.setTextSize(1);
+  // แสดงหน้าจอเริ่มระบบ (Splash Screen) พร้อมชื่อจุดติดตั้ง เช่น "MY BEDROOM"
   tft.setTextColor(COLOR_CYAN, COLOR_BG);
-  tft.drawString("Connecting to WiFi...", 160, 130);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(3);
+  tft.drawString(ROOM_NAME, 160, 75); // แสดงชื่อจุดติดตั้งขนาดใหญ่
+  
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.drawString("ESP32 IOT SENSOR MONITOR", 160, 110);
+
+  tft.setTextColor(COLOR_MUTED, COLOR_BG);
+  tft.drawString("Connecting to WiFi...", 160, 145);
   tft.setTextDatum(TL_DATUM);
 
   // เชื่อมต่อ WiFi
@@ -532,44 +789,55 @@ void setup() {
     retry++;
   }
 
-  // ซิงค์เวลา NTP
+  // ซิงค์เวลา NTP ประเทศไทย (UTC+7)
   configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
 
   // อ่านเซนเซอร์และสภาพอากาศรอบแรก
   readSensorAuto();
   fetchOutdoorWeather();
 
-  // วาดหน้าจอ UI หลัก
+  // วาดหน้าจอ UI เริ่มต้น
   drawUI();
   drawSensorValues();
   drawStatusCard();
 }
 
 void loop() {
-  // ตรวจจับการสัมผัสจอ (Sleep / Wake)
+  // ตรวจจับการสัมผัสจอ (Sleep / Wake / สลับโหมด)
   checkTouch();
 
-  // อ่านค่าเซ็นเซอร์ทุก 2 วินาที
+  // อ่านค่าเซ็นเซอร์ทุก 2 วินาที (อัปเดตเฉพาะส่วน ไม่ล้างทั้งจอ ไม่กระพริบ 100%)
   if (millis() - lastSensorRead > 2000) {
     readSensorAuto();
-    drawSensorValues();
+    if (currentScreen == SCREEN_DASHBOARD) {
+      drawSensorValues();
+    } else if (currentScreen == SCREEN_CLOCK) {
+      updateClockSensors();
+    }
     lastSensorRead = millis();
   }
 
   // อัปเดตสภาพอากาศภายนอกจาก Internet ทุก 10 นาที
   if (millis() - lastWeatherUpdate > 600000) {
     fetchOutdoorWeather();
-    drawSensorValues();
+    if (currentScreen == SCREEN_DASHBOARD) {
+      drawSensorValues();
+    } else if (currentScreen == SCREEN_CLOCK) {
+      drawClockWeatherInfo();
+    }
     lastWeatherUpdate = millis();
   }
 
-  // อัปเดตนาฬิกาหัวจอทุก 10 วินาที
-  if (millis() - lastClockUpdate > 10000) {
+  // อัปเดตนาฬิกาทุก 1 วินาที (ตัวเลขชั่วโมง Cyan / นาที Amber-Gold คมชัดนิ่งสนิท)
+  if (millis() - lastClockUpdate > 1000) {
     drawStatusCard();
+    if (currentScreen == SCREEN_CLOCK) {
+      updateClockDigits();
+    }
     lastClockUpdate = millis();
   }
 
-  // ส่งข้อมูลเข้า Cloud Firestore ตามรอบที่กำหนด
+  // ส่งข้อมูลเข้า Cloud Firestore ตามรอบที่กำหนด (ทำงานต่อเนื่องในเบื้องหลัง)
   if ((millis() - lastSend > (sendIntervalSec * 1000)) && WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client; client.setInsecure();
     HTTPClient http;

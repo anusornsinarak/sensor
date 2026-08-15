@@ -689,7 +689,19 @@ export default function App() {
     return alerts;
   }, [latestData, settings]);
 
-  const [codeTab, setCodeTab] = useState<'fixGuide' | 'lightCode' | 'jsonCode' | 'wifiGuide'>('fixGuide');
+  const [codeTab, setCodeTab] = useState<'preview' | 'lightCode' | 'fixGuide' | 'wifiGuide'>('preview');
+  const [simScreenMode, setSimScreenMode] = useState<'dashboard' | 'clock' | 'sleep'>('clock');
+  const [simLiveTime, setSimLiveTime] = useState<string>(() => format(new Date(), 'HH:mm'));
+  const [simLiveDate, setSimLiveDate] = useState<string>(() => format(new Date(), 'EEEE, dd MMM'));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = new Date();
+      setSimLiveTime(format(now, 'HH:mm'));
+      setSimLiveDate(format(now, 'EEEE, dd MMM'));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Dynamic server URL based on current host
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://ais-dev-qxri77mfo47bgbrp4yibxz-68615771923.asia-east1.run.app';
@@ -847,42 +859,297 @@ export default function App() {
               </div>
 
               {/* Modal Tabs */}
-              <div className="flex border-b border-slate-200 bg-slate-100/80 p-1.5 gap-1 shrink-0">
+              <div className="flex border-b border-slate-200 bg-slate-100/80 p-1.5 gap-1 shrink-0 overflow-x-auto">
                 <button
-                  onClick={() => setCodeTab('fixGuide')}
-                  className={`flex-1 py-2 px-3 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                    codeTab === 'fixGuide' ? 'bg-white text-blue-700 shadow-sm border border-slate-200' : 'text-slate-600 hover:bg-slate-200/60'
+                  onClick={() => setCodeTab('preview')}
+                  className={`py-2 px-3.5 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                    codeTab === 'preview' ? 'bg-white text-blue-700 shadow-sm border border-slate-200' : 'text-slate-600 hover:bg-slate-200/60'
                   }`}
                 >
-                  ⚠️ 1. วิธีแก้ Error ใน Arduino IDE (ตามรูปที่คุณส่ง)
+                  <Clock className="w-3.5 h-3.5 text-blue-600" />
+                  <span>📱 1. จำลองหน้าจอ CYD (แดชบอร์ด & หน้านาฬิกาตามภาพ)</span>
                 </button>
                 <button
                   onClick={() => setCodeTab('lightCode')}
-                  className={`flex-1 py-2 px-3 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                  className={`py-2 px-3.5 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
                     codeTab === 'lightCode' ? 'bg-white text-blue-700 shadow-sm border border-slate-200' : 'text-slate-600 hover:bg-slate-200/60'
                   }`}
                 >
-                  ⚡ 2. โค้ดแบบไม่ใช้ Library (Compile ได้ทันที)
+                  <Code className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>⚡ 2. โค้ด ESP32 C++ (พร้อมอัปโหลด)</span>
                 </button>
                 <button
-                  onClick={() => setCodeTab('jsonCode')}
-                  className={`flex-1 py-2 px-3 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                    codeTab === 'jsonCode' ? 'bg-white text-blue-700 shadow-sm border border-slate-200' : 'text-slate-600 hover:bg-slate-200/60'
+                  onClick={() => setCodeTab('fixGuide')}
+                  className={`py-2 px-3.5 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                    codeTab === 'fixGuide' ? 'bg-white text-blue-700 shadow-sm border border-slate-200' : 'text-slate-600 hover:bg-slate-200/60'
                   }`}
                 >
-                  🚀 3. โค้ด Full 2-Way Sync (ใช้ ArduinoJson)
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                  <span>⚠️ 3. คู่มือแก้ปัญหา / จอขาว / Pin</span>
                 </button>
                 <button
                   onClick={() => setCodeTab('wifiGuide')}
-                  className={`flex-1 py-2 px-3 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                  className={`py-2 px-3.5 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
                     codeTab === 'wifiGuide' ? 'bg-white text-blue-700 shadow-sm border border-slate-200' : 'text-slate-600 hover:bg-slate-200/60'
                   }`}
                 >
-                  📡 4. วิธีตั้งค่าต่อ WiFi
+                  <Wifi className="w-3.5 h-3.5 text-sky-600" />
+                  <span>📡 4. วิธีตั้งค่าต่อ WiFi</span>
                 </button>
               </div>
 
               <div className="p-4 sm:p-6 overflow-y-auto space-y-4 text-slate-700 text-sm">
+                
+                {/* 1. Interactive CYD Screen Simulator */}
+                {codeTab === 'preview' && (
+                  <div className="space-y-5 animate-in fade-in">
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                      <div>
+                        <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                          <span>✨ จำลองการทำงานหน้าจอจริงบนบอร์ด ESP32 CYD (2.8" TFT 320x240)</span>
+                        </h3>
+                        <p className="text-slate-600 mt-1">
+                          คุณสามารถคลิกปุ่มบนหน้าจอจำลองด้านล่าง หรือกดปุ่มโหมดเพื่อทดสอบการเปลี่ยนเป็น <strong>"หน้านาฬิกาตามภาพ (Smart Clock)"</strong> หรือกดปุ่ม <strong>"SLEEP (พักหน้าจอ)"</strong> ได้ทันที!
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          onClick={() => setSimScreenMode('clock')}
+                          className={`px-3 py-1.5 rounded-lg font-bold text-xs transition-colors cursor-pointer ${
+                            simScreenMode === 'clock' ? 'bg-blue-600 text-white shadow-xs' : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          ⏰ หน้านาฬิกาตามภาพ
+                        </button>
+                        <button
+                          onClick={() => setSimScreenMode('dashboard')}
+                          className={`px-3 py-1.5 rounded-lg font-bold text-xs transition-colors cursor-pointer ${
+                            simScreenMode === 'dashboard' ? 'bg-blue-600 text-white shadow-xs' : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          📊 หน้าแดชบอร์ดเซนเซอร์
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Virtual CYD Hardware Display Frame */}
+                    <div className="flex justify-center py-2">
+                      <div className="bg-slate-900 p-4 sm:p-5 rounded-[28px] shadow-2xl border-4 border-slate-800 inline-block">
+                        {/* Screen Housing */}
+                        <div className="w-[340px] sm:w-[480px] h-[255px] sm:h-[360px] bg-[#10141D] rounded-xl relative overflow-hidden flex flex-col select-none shadow-inner border border-slate-700/50">
+                          
+                          {/* Case A: SLEEP MODE */}
+                          {simScreenMode === 'sleep' && (
+                            <div 
+                              onClick={() => setSimScreenMode('clock')}
+                              className="w-full h-full bg-black flex flex-col items-center justify-center cursor-pointer transition-all p-6 text-center group"
+                            >
+                              <div className="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                                <span className="text-2xl animate-pulse">🌙</span>
+                              </div>
+                              <h4 className="text-slate-400 font-bold text-sm sm:text-base">โหมดพักหน้าจอ (Screen Sleeping)</h4>
+                              <p className="text-slate-600 text-xs mt-1">ไฟหน้าจอดับลงเพื่อประหยัดพลังงาน & ไม่รบกวนเวลานอน</p>
+                              <p className="text-blue-400 text-xs font-semibold mt-3 bg-blue-950/60 px-3 py-1 rounded-full border border-blue-800/60 animate-bounce">
+                                👆 แตะที่ใดก็ได้บนหน้าจอเพื่อปลุก (Touch to Wake)
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Case B: CLOCK MODE (หน้านาฬิกาตามภาพพร้อมเกจโค้งซ้ายขวา) */}
+                          {simScreenMode === 'clock' && (
+                            <div className="w-full h-full bg-[#10141D] flex flex-col justify-between p-3 sm:p-4 text-white relative">
+                              
+                              {/* Top Bar: Date & Room */}
+                              <div className="text-center space-y-0.5 shrink-0">
+                                <p className="text-[11px] sm:text-xs text-slate-400 font-semibold tracking-wider uppercase">
+                                  {simLiveDate}
+                                </p>
+                                <span className="inline-block text-[10px] sm:text-[11px] text-cyan-400 font-bold tracking-wide">
+                                  [ {ROOM_STANDARDS[settings.roomType as RoomType]?.name.split(' ')[0] || 'GENERAL'} ]
+                                </span>
+                              </div>
+
+                              {/* Center Layout: Left Arc, Big Time, Right Arc */}
+                              <div className="relative flex items-center justify-center flex-1 my-auto">
+                                
+                                {/* Left Cyan Arc Gauge (อุณหภูมิในห้อง) */}
+                                <div className="absolute left-1 sm:left-4 flex flex-col items-center justify-center text-cyan-400">
+                                  <span className="text-[9px] sm:text-[10px] text-cyan-300 font-bold">INDOOR</span>
+                                  <span className="text-xs sm:text-sm font-extrabold text-cyan-300">
+                                    {latestData && !latestData.sensor_error ? `${latestData.temperature}°C` : '28.5°C'}
+                                  </span>
+                                </div>
+
+                                {/* SVG Arcs overlay matching the uploaded reference image */}
+                                <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 400 200">
+                                  {/* Left Arc Track */}
+                                  <path d="M 85,25 A 110,110 0 0,0 85,175" fill="none" stroke="#222b3a" strokeWidth="6" strokeLinecap="round" />
+                                  {/* Left Cyan Arc Active (Temp Gauge) */}
+                                  <path d="M 85,35 A 110,110 0 0,0 72,135" fill="none" stroke="#22d3ee" strokeWidth="7" strokeLinecap="round" />
+                                  {/* Circular Ring Indicator Point on Cyan Arc */}
+                                  <circle cx="72" cy="135" r="7" fill="#22d3ee" stroke="#ffffff" strokeWidth="2.5" />
+                                  <circle cx="72" cy="135" r="3" fill="#10141D" />
+
+                                  {/* Right Arc Track */}
+                                  <path d="M 315,25 A 110,110 0 0,1 315,175" fill="none" stroke="#222b3a" strokeWidth="6" strokeLinecap="round" />
+                                  {/* Right Orange Arc Active (Humidity Gauge) */}
+                                  <path d="M 315,35 A 110,110 0 0,1 328,125" fill="none" stroke="#f97316" strokeWidth="7" strokeLinecap="round" />
+                                  {/* Notch Indicator on Orange Arc */}
+                                  <circle cx="328" cy="125" r="6" fill="#f97316" stroke="#ffffff" strokeWidth="2.5" />
+                                </svg>
+
+                                {/* Right Orange Arc Gauge (ความชื้นในห้อง) */}
+                                <div className="absolute right-1 sm:right-4 flex flex-col items-center justify-center text-orange-400">
+                                  <span className="text-[9px] sm:text-[10px] text-orange-300 font-bold">HUMI</span>
+                                  <span className="text-xs sm:text-sm font-extrabold text-orange-300">
+                                    {latestData && !latestData.sensor_error ? `${latestData.humidity}%` : '65%'}
+                                  </span>
+                                </div>
+
+                                {/* Center Big Digital Clock & Weather (ตามภาพ 100%) */}
+                                <div className="flex flex-col items-center justify-center z-10 space-y-1">
+                                  {/* Giant Clean Dual-Color Time Digits (ชั่วโมง Cyan, นาที Amber) */}
+                                  <h2 className="text-4xl sm:text-6xl font-extrabold tracking-tight font-mono drop-shadow-md flex items-center justify-center">
+                                    <span className="text-cyan-400">{simLiveTime.split(':')[0] || '12'}</span>
+                                    <span className="text-white/80 px-0.5 animate-pulse">:</span>
+                                    <span className="text-amber-400">{simLiveTime.split(':')[1] || '00'}</span>
+                                  </h2>
+
+                                  {/* Outdoor Weather below time */}
+                                  <div className="flex items-center gap-2 pt-1">
+                                    <div className="flex items-center text-amber-400">
+                                      <Sun className="w-4 h-4 sm:w-5 sm:h-5 fill-amber-400" />
+                                      <Cloud className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-slate-400 -ml-2.5 mt-1 fill-slate-500" />
+                                    </div>
+                                    <span className="text-sm sm:text-lg font-bold text-white">
+                                      {outdoorWeather ? `${outdoorWeather.temp.toFixed(0)}°C` : '28°C'}
+                                    </span>
+                                    <span className="text-[11px] sm:text-xs text-slate-400 font-medium">
+                                      {outdoorWeather ? outdoorWeather.locationName : 'Partly Cloudy'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Bottom Navigation Buttons */}
+                              <div className="grid grid-cols-2 gap-2 pt-1 shrink-0">
+                                <button
+                                  onClick={() => setSimScreenMode('dashboard')}
+                                  className="py-1.5 sm:py-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-600/60 rounded-lg text-cyan-300 text-[11px] sm:text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1 shadow-xs"
+                                >
+                                  <span>📱 DASHBOARD</span>
+                                </button>
+                                <button
+                                  onClick={() => setSimScreenMode('sleep')}
+                                  className="py-1.5 sm:py-2 bg-blue-950/80 hover:bg-blue-900 border border-blue-700/60 rounded-lg text-blue-200 text-[11px] sm:text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1 shadow-xs"
+                                >
+                                  <span>🌙 SLEEP</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Case C: DASHBOARD MODE */}
+                          {simScreenMode === 'dashboard' && (
+                            <div className="w-full h-full bg-[#12161C] flex flex-col justify-between p-2.5 sm:p-3.5 text-white">
+                              {/* Header */}
+                              <div className="flex items-center justify-between pb-1.5 border-b border-slate-800 shrink-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs sm:text-sm font-extrabold text-white uppercase tracking-wider">
+                                    {ROOM_STANDARDS[settings.roomType as RoomType]?.name || 'MY BEDROOM'}
+                                  </span>
+                                  <span className="text-[10px] text-cyan-400 font-bold bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-800/60">
+                                    [ IOT SENSOR ]
+                                  </span>
+                                </div>
+                                <span className="text-xs text-slate-400 font-mono font-bold">{simLiveTime}</span>
+                              </div>
+
+                              {/* Top 2 Cards: Temperature & Humidity */}
+                              <div className="grid grid-cols-2 gap-2 my-auto">
+                                {/* Temp Card */}
+                                <div className="bg-[#171C24] border border-slate-700/70 rounded-xl p-2 sm:p-3">
+                                  <span className="text-[10px] sm:text-xs font-bold text-orange-400 block">TEMPERATURE</span>
+                                  <div className="flex items-baseline gap-1 mt-1">
+                                    <span className="text-2xl sm:text-4xl font-extrabold text-white font-mono">
+                                      {latestData && !latestData.sensor_error ? latestData.temperature.toFixed(1) : '28.5'}
+                                    </span>
+                                    <span className="text-xs sm:text-sm font-bold text-orange-400">°C</span>
+                                  </div>
+                                  <span className="text-[9px] sm:text-[10px] text-emerald-400 font-bold mt-1 block">OPTIMAL</span>
+                                </div>
+
+                                {/* Humidity Card */}
+                                <div className="bg-[#171C24] border border-slate-700/70 rounded-xl p-2 sm:p-3">
+                                  <span className="text-[10px] sm:text-xs font-bold text-cyan-400 block">HUMIDITY</span>
+                                  <div className="flex items-baseline gap-1 mt-1">
+                                    <span className="text-2xl sm:text-4xl font-extrabold text-white font-mono">
+                                      {latestData && !latestData.sensor_error ? latestData.humidity.toFixed(0) : '65'}
+                                    </span>
+                                    <span className="text-xs sm:text-sm font-bold text-cyan-400">%</span>
+                                  </div>
+                                  <span className="text-[9px] sm:text-[10px] text-emerald-400 font-bold mt-1 block">OPTIMAL</span>
+                                </div>
+                              </div>
+
+                              {/* Bottom 3 Cards: Outdoor, CLOCK (New!), SLEEP */}
+                              <div className="grid grid-cols-3 gap-2 shrink-0">
+                                {/* Outdoor Weather */}
+                                <div className="bg-[#0F1C30] border border-slate-700/70 rounded-xl p-2 flex flex-col justify-center">
+                                  <span className="text-[9px] text-slate-400 font-bold">OUTDOOR ({settings.weatherLocation ? settings.weatherLocation.split(' ')[0] : 'ปราจีน'})</span>
+                                  <span className="text-xs sm:text-sm font-extrabold text-white">
+                                    {outdoorWeather ? `${outdoorWeather.temp.toFixed(1)}°C` : '28.0°C'}
+                                  </span>
+                                  <span className="text-[9px] text-slate-400 truncate">
+                                    {outdoorWeather ? outdoorWeather.locationName : 'Partly Cloudy'}
+                                  </span>
+                                </div>
+
+                                {/* CLOCK Button (New!) */}
+                                <button
+                                  onClick={() => setSimScreenMode('clock')}
+                                  className="bg-blue-600/80 hover:bg-blue-600 border-2 border-blue-400/80 rounded-xl p-2 flex flex-col items-center justify-center cursor-pointer transition-all hover:scale-[1.02] shadow-sm group"
+                                >
+                                  <span className="text-xs sm:text-sm font-extrabold text-white flex items-center gap-1">
+                                    ⏰ CLOCK
+                                  </span>
+                                  <span className="text-[9px] text-cyan-200 font-semibold mt-0.5">
+                                    DESK MODE
+                                  </span>
+                                </button>
+
+                                {/* SLEEP Button */}
+                                <button
+                                  onClick={() => setSimScreenMode('sleep')}
+                                  className="bg-slate-800/90 hover:bg-slate-800 border border-slate-600/70 rounded-xl p-2 flex flex-col items-center justify-center cursor-pointer transition-all hover:scale-[1.02]"
+                                >
+                                  <span className="text-xs sm:text-sm font-extrabold text-white">
+                                    🌙 SLEEP
+                                  </span>
+                                  <span className="text-[9px] text-slate-400 font-semibold mt-0.5">
+                                    TOUCH SCREEN
+                                  </span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Quick Guidance Box */}
+                    <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-2 text-xs text-slate-700">
+                      <p className="font-bold text-slate-800 text-sm flex items-center gap-1.5">
+                        <span>💡 วิธีใช้งานปุ่ม CLOCK และ SLEEP บนบอร์ด ESP32 จริง:</span>
+                      </p>
+                      <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1">
+                        <li><strong>ปุ่ม CLOCK (ข้าง Sleep):</strong> แตะที่ปุ่มสีน้ำเงินตรงกลางล่างเพื่อเปลี่ยนหน้าจอเป็น <strong>หน้านาฬิกาตั้งโต๊ะ (Smart Clock)</strong> ตามภาพ พร้อมเส้นโค้งเกจวัดอุณหภูมิ (ฟ้า) และความชื้น (ส้ม)</li>
+                        <li><strong>ปุ่ม SLEEP:</strong> แตะปุ่มขวาล่างเพื่อดับไฟหน้าจอเวลานอน โดยระบบยังอ่านค่าและส่งขึ้น Cloud ตามปกติ</li>
+                        <li><strong>สลับกลับหน้าเดิม:</strong> เมื่ออยู่ในหน้านาฬิกา เพียงแตะที่หน้าจอตรงไหนก็ได้ หรือกดปุ่ม <code>DASHBOARD</code> ระบบจะกลับมาหน้าจอเดิมทันที!</li>
+                      </ul>
+                    </div>
+                  </div>
+                )}
                 
                 {codeTab === 'fixGuide' && (
                   <div className="space-y-6">
